@@ -7,6 +7,7 @@ pip install python-telegram-bot==22.7 rubpy pycryptodome
 import asyncio
 import logging
 import os
+import random
 import re
 import sqlite3
 from datetime import datetime, timedelta
@@ -69,7 +70,8 @@ os.makedirs(SESSIONS_DIR, exist_ok=True)
     ST_REPORT_TYPES,
     ST_REPORT_OTHER_TEXT,
     ST_REPORT_COUNT,
-) = range(8)
+    ST_CARD_NUMBER,
+) = range(9)
 
 REPORT_TYPES_MAP: dict[str, tuple[str, ReportType]] = {
     "1": ("🔞 محتوای مستهجن", ReportType.PORNOGRAPHY),
@@ -98,10 +100,11 @@ def init_db() -> None:
                 coins              INTEGER DEFAULT 0,
                 total_reports      INTEGER DEFAULT 0,
                 total_invites      INTEGER DEFAULT 0,
+                last_daily_reward  TEXT,
                 created_at         TEXT DEFAULT (datetime('now'))
             )
         """)
-        for col, ctype in [("rubika_auth", "TEXT"), ("rubika_private_key", "TEXT")]:
+        for col, ctype in [("rubika_auth", "TEXT"), ("rubika_private_key", "TEXT"), ("last_daily_reward", "TEXT")]:
             try:
                 conn.execute(f"ALTER TABLE users ADD COLUMN {col} {ctype}")
             except sqlite3.OperationalError:
@@ -138,8 +141,8 @@ def upsert_user(telegram_id: int, **kwargs) -> None:
 def add_stats(telegram_id: int, sent: int) -> None:
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
-            "UPDATE users SET coins = coins + ?, total_reports = total_reports + ? WHERE telegram_id = ?",
-            (sent * 10, sent, telegram_id),
+            "UPDATE users SET total_reports = total_reports + ? WHERE telegram_id = ?",
+            (sent, telegram_id),
         )
         conn.commit()
 
@@ -304,7 +307,7 @@ def kb_main(premium: bool) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🎁 جایزه روزانه",   callback_data="daily_reward"),
         ],
         [
-            InlineKeyboardButton("👥 دعوت دوستان",    callback_data="invite"),
+            InlineKeyboardButton("🔗 لینک دعوت",     callback_data="referral_link"),
             InlineKeyboardButton("❓ راهنما",          callback_data="help"),
         ],
     ])
@@ -330,6 +333,15 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     bot = ctx.bot
     user  = get_user(tg_id)
     ctx.user_data.clear()
+
+    args = ctx.args or []
+    if args and args[0].startswith("ref_"):
+        try:
+            referrer_id = int(args[0][4:])
+            if referrer_id != tg_id:
+                ctx.user_data["referrer_id"] = referrer_id
+        except (ValueError, IndexError):
+            pass
 
     is_member = await check_user_membership(bot, tg_id)
     if not is_member:
@@ -447,6 +459,31 @@ async def receive_code(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
             rubika_private_key=login_data["private_key"],
         )
 
+        referrer_id = ctx.user_data.get("referrer_id")
+        if referrer_id:
+            referrer = get_user(referrer_id)
+            if referrer:
+                upsert_user(referrer_id, total_invites=(referrer.get("total_invites", 0) + 1))
+                now = datetime.now()
+                if is_premium_active(referrer):
+                    current_until = datetime.fromisoformat(referrer["premium_until"])
+                    new_until = current_until + timedelta(hours=1)
+                else:
+                    new_until = now + timedelta(hours=1)
+                upsert_user(referrer_id, is_premium=1, premium_until=new_until.isoformat())
+                try:
+                    await ctx.bot.send_message(
+                        chat_id=referrer_id,
+                        text=(
+                            f"🎁 یک نفر با لینک دعوت شما عضو شد!\n"
+                            f"👑 اشتراک ۱ ساعته به شما اضافه شد.\n"
+                            f"📊 مجموع دعوت‌ها: {referrer.get('total_invites', 0) + 1}"
+                        ),
+                    )
+                except Exception:
+                    pass
+            ctx.user_data.pop("referrer_id", None)
+
         await asyncio.sleep(0.5)
 
         await update.message.reply_text("✅ ورود موفق!", reply_markup=kb_main(False))
@@ -539,7 +576,6 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> in
             f"📊 وضعیت حساب\n\n"
             f"پلن: {plan}\n"
             f"محدودیت: {limit} از هر نوع\n"
-            f"🪙 سکه: {user.get('coins', 0)}\n"
             f"📊 گزارشات: {user.get('total_reports', 0)}\n"
             f"📱 شماره: {user.get('phone', '-')}",
             reply_markup=kb_menu_return(),
@@ -555,19 +591,13 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> in
             )
         else:
             await query.message.reply_text(
-                f"💎 پلن اشتراکی\n• {PREMIUM_LIMIT} گزارش\n• {PREMIUM_PRICE} در ماه\n\n"
-                f"خرید: {ADMIN_USERNAME}",
+                f"💎 پلن اشتراکی\n"
+                f"• {PREMIUM_LIMIT} گزارش در هر نوع\n"
+                f"• {PREMIUM_PRICE} در ماه\n\n"
+                f"💳 شماره کارت بانکی خود را ارسال کنید تا رسید پرداخت برای ادمین ارسال شود:",
                 reply_markup=kb_menu_return(),
             )
-        return ST_MAIN_MENU
-
-    if data == "invite":
-        bot_info = await ctx.bot.get_me()
-        link = f"https://t.me/{bot_info.username}?start=ref_{tg_id}"
-        await query.message.reply_text(
-            f"🎁 لینک دعوت:\n{link}\n\nهر دعوت = ۵۰ سکه",
-            reply_markup=kb_menu_return(),
-        )
+            return ST_CARD_NUMBER
         return ST_MAIN_MENU
 
     if data == "help":
@@ -584,8 +614,102 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> in
         )
         return ST_MAIN_MENU
 
+    if data == "referral_link":
+        if not user:
+            await query.message.reply_text("ابتدا /start بزن.")
+            return ST_MAIN_MENU
+        bot_info = await ctx.bot.get_me()
+        bot_username = bot_info.username
+        ref_link = f"https://t.me/{bot_username}?start=ref_{tg_id}"
+        invites = user.get("total_invites", 0)
+        await query.message.reply_text(
+            f"🔗 لینک دعوت شما\n\n"
+            f"📱 لینک:\n{ref_link}\n\n"
+            f"👥 تعداد دعوت‌ها: {invites}\n\n"
+            f"🎁 به ازای هر نفری که با لینک شما عضو شود\n"
+            f"   ۱ ساعت اشتراک رایگان دریافت می‌کنید!",
+            reply_markup=kb_menu_return(),
+        )
+        return ST_MAIN_MENU
+
     if data == "daily_reward":
-        await query.message.reply_text("🎯 به زودی 🔜", reply_markup=kb_menu_return())
+        if not user:
+            await query.message.reply_text("ابتدا /start بزن.")
+            return ST_MAIN_MENU
+
+        last_reward = user.get("last_daily_reward")
+        now = datetime.now()
+
+        if last_reward:
+            try:
+                last_dt = datetime.fromisoformat(last_reward)
+                diff = now - last_dt
+                if diff < timedelta(hours=24):
+                    remaining = timedelta(hours=24) - diff
+                    hours = remaining.seconds // 3600
+                    minutes = (remaining.seconds % 3600) // 60
+                    await query.message.reply_text(
+                        f"⏳ جایزه بعدی در {hours} ساعت و {minutes} دقیقه",
+                        reply_markup=kb_menu_return(),
+                    )
+                    return ST_MAIN_MENU
+            except (ValueError, TypeError):
+                pass
+
+        dice_msg = await query.message.reply_text("🎲")
+        await asyncio.sleep(0.5)
+        await dice_msg.edit_text("🎲 .")
+        await asyncio.sleep(0.5)
+        await dice_msg.edit_text("🎲 ..")
+        await asyncio.sleep(0.5)
+        await dice_msg.edit_text("🎲 ...")
+        await asyncio.sleep(1)
+
+        roll = random.randint(1, 6)
+
+        if roll == 6:
+            prize_days = 3
+            prize_text = "🏆 شماره ۶! اشتراک ۳ روزه پرو برنده شدید!"
+            emoji = "🏆"
+        elif roll in (4, 5):
+            prize_days = 1
+            prize_text = "🎉 شماره ۴ یا ۵! اشتراک ۱ روزه پرو برنده شدید!"
+            emoji = "🎉"
+        else:
+            prize_days = 0
+            prize_text = f"😔 شماره {roll} آمد. برنده نشدید!"
+            emoji = "😔"
+
+        upsert_user(tg_id, last_daily_reward=now.isoformat())
+
+        result_text = (
+            f"{emoji} نتیجه تاس:\n\n"
+            f"🎲 ━━━━━━━━━━━━━━━━ 🎲\n"
+            f"       [ {roll} ]\n"
+            f"🎲 ━━━━━━━━━━━━━━━━ 🎲\n\n"
+            f"{prize_text}"
+        )
+
+        if prize_days > 0:
+            if is_premium_active(user):
+                current_until = datetime.fromisoformat(user["premium_until"])
+                new_until = current_until + timedelta(days=prize_days)
+            else:
+                new_until = now + timedelta(days=prize_days)
+            until = new_until.isoformat()
+            upsert_user(tg_id, is_premium=1, premium_until=until)
+
+            user = get_user(tg_id)
+            premium = is_premium_active(user) if user else False
+
+            result_text += (
+                f"\n\n👑 اشتراک تا {until[:10]} فعال است.\n"
+                f"📊 محدودیت: {PREMIUM_LIMIT} گزارش در هر نوع"
+            )
+            await dice_msg.edit_text(result_text, reply_markup=kb_main(premium))
+        else:
+            result_text += "\n\n💡 فردا دوباره امتحان کنید!"
+            await dice_msg.edit_text(result_text, reply_markup=kb_menu_return())
         return ST_MAIN_MENU
 
     if data.startswith("rt_"):
@@ -737,6 +861,105 @@ async def receive_count(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 async def cmd_stop(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     ctx.user_data["stop_flag"] = True
     await update.message.reply_text("⛔ توقف")
+
+# ────────────────────────────────────────────────────────────────────────
+#  Subscription / Card Number
+# ────────────────────────────────────────────────────────────────────────
+async def receive_card_number(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    text  = update.message.text.strip()
+    tg_id = update.effective_user.id
+    user  = get_user(tg_id)
+
+    card_clean = re.sub(r"[^\d]", "", text)
+    if len(card_clean) != 16 or not card_clean.isdigit():
+        await update.message.reply_text(
+            "❌ شماره کارت نامعتبر است.\nیک شماره کارت ۱۶ رقمی وارد کنید:",
+            reply_markup=kb_menu_return(),
+        )
+        return ST_CARD_NUMBER
+
+    ctx.user_data["card_number"] = card_clean
+
+    card_display = f"{card_clean[:4]}-{card_clean[4:8]}-{card_clean[8:12]}-{card_clean[12:]}"
+
+    approve_keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ تایید", callback_data=f"approve_sub_{tg_id}"),
+            InlineKeyboardButton("❌ رد", callback_data=f"reject_sub_{tg_id}"),
+        ]
+    ])
+
+    for admin_id in ADMIN_IDS:
+        try:
+            await ctx.bot.send_message(
+                chat_id=admin_id,
+                text=(
+                    f"💎 درخواست اشتراک جدید\n\n"
+                    f"👤 کاربر: {user.get('phone', '-')}\n"
+                    f"🆔 تلگرام: {tg_id}\n"
+                    f"💳 کارت: {card_display}\n"
+                    f"💰 مبلغ: {PREMIUM_PRICE}\n"
+                    f"⏰ تاریخ: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+                ),
+                reply_markup=approve_keyboard,
+            )
+        except Exception as exc:
+            logger.error("Failed to send to admin %d: %s", admin_id, exc)
+
+    await update.message.reply_text(
+        f"✅ درخواست شما ثبت شد!\n\n"
+        f"💳 کارت: {card_display}\n"
+        f"💰 مبلغ: {PREMIUM_PRICE}\n\n"
+        f"⏳ منتظر تایید ادمین باشید...\n"
+        f"بعد از تایید، اشتراک شما فعال می‌شود.",
+        reply_markup=kb_menu_return(),
+    )
+    return ST_MAIN_MENU
+
+async def admin_approve_sub(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+
+    if update.effective_user.id not in ADMIN_IDS:
+        await query.answer("⛔ فقط ادمین", show_alert=True)
+        return
+
+    data = query.data
+    if data.startswith("approve_sub_"):
+        target_id = int(data.split("_")[-1])
+        set_premium(target_id, 1)
+
+        await query.message.edit_text(
+            f"✅ اشتراک فعال شد!\n👤 کاربر: {target_id}"
+        )
+
+        try:
+            user = get_user(target_id)
+            premium_until = user.get("premium_until", "")[:10] if user else ""
+            await ctx.bot.send_message(
+                chat_id=target_id,
+                text=(
+                    f"🎉 اشتراک شما فعال شد!\n\n"
+                    f"👑 اشتراک تا {premium_until} فعال است.\n"
+                    f"📊 محدودیت: {PREMIUM_LIMIT} گزارش در هر نوع"
+                ),
+            )
+        except Exception as exc:
+            logger.error("Failed to notify user %d: %s", target_id, exc)
+
+    elif data.startswith("reject_sub_"):
+        target_id = int(data.split("_")[-1])
+        await query.message.edit_text(
+            f"❌ درخواست رد شد.\n👤 کاربر: {target_id}"
+        )
+
+        try:
+            await ctx.bot.send_message(
+                chat_id=target_id,
+                text="❌ درخواست اشتراک شما توسط ادمین رد شد.\nبرای اطلاعات بیشتر با ادمین تماس بگیرید.",
+            )
+        except Exception as exc:
+            logger.error("Failed to notify user %d: %s", target_id, exc)
 
 # ────────────────────────────────────────────────────────────────────────
 #  Pipeline

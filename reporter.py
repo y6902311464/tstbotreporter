@@ -1,9 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Telegram Bot — Rubika Reporter Gateway v5 (COMPLETE & BUG-FREE)
-Single file. Stack: python-telegram-bot 20.x + rubpy + SQLite
-
-pip install python-telegram-bot==20.7 rubpy pycryptodome
+coding by amirwebcode : telegram = @saeqehe
+pip install python-telegram-bot==22.7 rubpy pycryptodome
 """
 
 import asyncio
@@ -22,6 +20,7 @@ from rubpy.crypto import Crypto
 from rubpy.enums import ReportType
 
 from telegram import (
+    ChatMember,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
@@ -49,6 +48,8 @@ TELEGRAM_TOKEN = "8179859382:AAHnhHIa5-DXV923UfRdbEgOUnLO5P79qIs"
 ADMIN_IDS: set[int] = {8503523539}
 ADMIN_USERNAME = "@Saeqehe"
 
+REQUIRED_CHANNELS = ["mrvpn294", "amirwebcode1"]
+
 FREE_LIMIT    = 100
 PREMIUM_LIMIT = 1000
 PREMIUM_PRICE = "350,000 تومان"
@@ -71,13 +72,13 @@ os.makedirs(SESSIONS_DIR, exist_ok=True)
 ) = range(8)
 
 REPORT_TYPES_MAP: dict[str, tuple[str, ReportType]] = {
-    "1": ("محتوای مستهجن", ReportType.PORNOGRAPHY),
-    "2": ("خشونت",         ReportType.VIOLENCE),
-    "3": ("اسپم",          ReportType.SPAM),
-    "4": ("کودک‌آزاری",    ReportType.CHILD_ABUSE),
-    "5": ("نقض حق‌نشر",   ReportType.COPYRIGHT),
-    "6": ("فیشینگ",        ReportType.FISHING),
-    "7": ("سایر",          ReportType.OTHER),
+    "1": ("🔞 محتوای مستهجن", ReportType.PORNOGRAPHY),
+    "2": ("⚔️ خشونت",         ReportType.VIOLENCE),
+    "3": ("📛 اسپم",          ReportType.SPAM),
+    "4": ("👶 کودک‌آزاری",    ReportType.CHILD_ABUSE),
+    "5": ("©️ نقض حق‌نشر",    ReportType.COPYRIGHT),
+    "6": ("🎣 فیشینگ",        ReportType.FISHING),
+    "7": ("📝 سایر",          ReportType.OTHER),
 }
 
 # ────────────────────────────────────────────────────────────────────────
@@ -191,7 +192,28 @@ def cleanup_session_files(session_path: str | None) -> None:
                 pass
 
 # ────────────────────────────────────────────────────────────────────────
-#  Rubika auth — NO terminal prompts
+#  Force Join
+# ────────────────────────────────────────────────────────────────────────
+async def check_user_membership(bot, user_id: int) -> bool:
+    for channel in REQUIRED_CHANNELS:
+        try:
+            member = await bot.get_chat_member(chat_id=f"@{channel}", user_id=user_id)
+            if member.status in (ChatMember.LEFT, ChatMember.BANNED):
+                return False
+        except Exception as exc:
+            logger.warning("check_member @%s user=%d: %s (بات ادمین کانال نیست؟)", channel, user_id, exc)
+            return False
+    return True
+
+def kb_force_join() -> InlineKeyboardMarkup:
+    buttons = []
+    for ch in REQUIRED_CHANNELS:
+        buttons.append([InlineKeyboardButton(f"📢 @{ch}", url=f"https://t.me/{ch}")])
+    buttons.append([InlineKeyboardButton("✅ بررسی عضویت", style="success", callback_data="check_join")])
+    return InlineKeyboardMarkup(buttons)
+
+# ────────────────────────────────────────────────────────────────────────
+#  Rubika auth
 # ────────────────────────────────────────────────────────────────────────
 async def rubika_send_code(phone: str, pass_key: str = None) -> dict:
     tmp_path = os.path.join(SESSIONS_DIR, f"tmp_{phone}")
@@ -230,10 +252,8 @@ async def rubika_sign_in(phone: str, code: str, phone_code_hash: str) -> dict:
         if result.status != "OK":
             raise RuntimeError(f"خطا در ورود: {result.status}")
 
-        # ── رمزگشایی auth ──
         decrypted_auth = Crypto.decrypt_RSA_OAEP(private_key, result.auth)
 
-        # ── تنظیم state داخلی client (دقیقاً مثل start()) ──
         client.auth = decrypted_auth
         client.key = Crypto.passphrase(decrypted_auth)
         client.decode_auth = Crypto.decode_auth(decrypted_auth)
@@ -241,7 +261,6 @@ async def rubika_sign_in(phone: str, code: str, phone_code_hash: str) -> dict:
         client.private_key = private_key
         client.guid = result.user.user_guid
 
-        # ── ذخیره session در فایل .session ──
         client.session.insert(
             auth=decrypted_auth,
             guid=result.user.user_guid,
@@ -250,7 +269,6 @@ async def rubika_sign_in(phone: str, code: str, phone_code_hash: str) -> dict:
             private_key=private_key,
         )
 
-        # ── ثبت دستگاه ──
         await client.register_device(device_model=session_name)
 
         await client.disconnect()
@@ -270,41 +288,61 @@ async def rubika_sign_in(phone: str, code: str, phone_code_hash: str) -> dict:
 # ────────────────────────────────────────────────────────────────────────
 def kb_phone() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        [[KeyboardButton("📱 ارسال شماره تماس", request_contact=True)]],
+        [[KeyboardButton("📱 ارسال شماره تماس", request_contact=True, style="primary")]],
         resize_keyboard=True,
     )
 
 def kb_main(premium: bool) -> InlineKeyboardMarkup:
-    plan_label = "👑 اشتراکی" if premium else "🆓 رایگان"
+    plan_label = "⭐ ویژه" if premium else "🔹 رایگان"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🚨 گزارش تخلف",          callback_data="start_report")],
-        [InlineKeyboardButton("📊 وضعیت حساب",           callback_data="account_status")],
-        [InlineKeyboardButton(f"💎 {plan_label}",        callback_data="subscription")],
-        [InlineKeyboardButton("🎁 جایزه روزانه",         callback_data="daily_reward")],
-        [InlineKeyboardButton("👥 دعوت دوستان",          callback_data="invite")],
-        [InlineKeyboardButton("❓ راهنما",               callback_data="help")],
+        [
+            InlineKeyboardButton("🚨 گزارش تخلف",    style="danger",  callback_data="start_report"),
+            InlineKeyboardButton("📊 وضعیت حساب",     style="primary", callback_data="account_status"),
+        ],
+        [
+            InlineKeyboardButton(f"💎 {plan_label}",  style="success", callback_data="subscription"),
+            InlineKeyboardButton("🎁 جایزه روزانه",   style="success", callback_data="daily_reward"),
+        ],
+        [
+            InlineKeyboardButton("👥 دعوت دوستان",    style="primary", callback_data="invite"),
+            InlineKeyboardButton("❓ راهنما",          style="primary", callback_data="help"),
+        ],
     ])
 
 def kb_menu_return() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔙 بازگشت", callback_data="back_menu")],
+        [InlineKeyboardButton("🔙 بازگشت", style="primary", callback_data="back_menu")],
     ])
 
 def kb_report_types(selected: set[str]) -> InlineKeyboardMarkup:
+    styles = {
+        "1": "danger", "2": "danger", "3": "success",
+        "4": "danger", "5": "primary", "6": "danger", "7": "primary",
+    }
     buttons = []
     for k, (label, _) in REPORT_TYPES_MAP.items():
         mark = "✅" if k in selected else "⬜"
-        buttons.append(InlineKeyboardButton(f"{mark} {label}", callback_data=f"rt_{k}"))
-    buttons.append(InlineKeyboardButton("▶️ شروع گزارش", callback_data="rt_confirm"))
-    return InlineKeyboardMarkup([[b] for b in buttons])
+        buttons.append([InlineKeyboardButton(f"{mark} {label}", style=styles.get(k, "primary"), callback_data=f"rt_{k}")])
+    buttons.append([InlineKeyboardButton("▶️ شروع گزارش", style="success", callback_data="rt_confirm")])
+    return InlineKeyboardMarkup(buttons)
 
 # ────────────────────────────────────────────────────────────────────────
 #  Conversation handlers
 # ────────────────────────────────────────────────────────────────────────
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     tg_id = update.effective_user.id
+    bot = ctx.bot
     user  = get_user(tg_id)
     ctx.user_data.clear()
+
+    is_member = await check_user_membership(bot, tg_id)
+    if not is_member:
+        await update.message.reply_text(
+            "⛔ برای استفاده از ربات ابتدا باید در کانال‌های زیر عضو شوید:\n\n"
+            "بعد از عضویت، دکمه «بررسی عضویت» را بزنید:",
+            reply_markup=kb_force_join(),
+        )
+        return ConversationHandler.END
 
     if user and user.get("rubika_session") and session_exists(user["rubika_session"]):
         premium = is_premium_active(user)
@@ -426,6 +464,33 @@ async def receive_code(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 # ────────────────────────────────────────────────────────────────────────
 #  Main menu / Callback handler
 # ────────────────────────────────────────────────────────────────────────
+async def check_join_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    tg_id = update.effective_user.id
+    bot = ctx.bot
+
+    is_member = await check_user_membership(bot, tg_id)
+    if not is_member:
+        await query.message.reply_text(
+            "❌ هنوز در کانال‌ها عضو نشدید!\n\n"
+            "لطفاً ابتدا در هر دو کانال عضو شوید و سپس «بررسی عضویت» را بزنید:",
+            reply_markup=kb_force_join(),
+        )
+        return ConversationHandler.END
+
+    user = get_user(tg_id)
+    if user and user.get("rubika_session") and session_exists(user["rubika_session"]):
+        premium = is_premium_active(user)
+        await query.message.reply_text("✅ عضویت تایید شد! 👋", reply_markup=kb_main(premium))
+        return ST_MAIN_MENU
+
+    await query.message.reply_text(
+        "✅ عضویت تایید شد!\n\n📱 شماره روبیکا را بفرست:",
+        reply_markup=kb_phone(),
+    )
+    return ST_PHONE
+
 async def back_to_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     if query:
@@ -501,7 +566,7 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> in
         return ST_MAIN_MENU
 
     if data == "invite":
-        bot_info = await query.get_bot().get_me()
+        bot_info = await ctx.bot.get_me()
         link = f"https://t.me/{bot_info.username}?start=ref_{tg_id}"
         await query.message.reply_text(
             f"🎁 لینک دعوت:\n{link}\n\nهر دعوت = ۵۰ سکه",
@@ -527,7 +592,6 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> in
         await query.message.reply_text("🎯 به زودی 🔜", reply_markup=kb_menu_return())
         return ST_MAIN_MENU
 
-    # ── انتخاب نوع گزارش ──
     if data.startswith("rt_"):
         key = data[3:]
 
@@ -624,9 +688,17 @@ async def receive_count(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         await update.message.reply_text(msg + "\nعدد کمتر:", reply_markup=kb_menu_return())
         return ST_REPORT_COUNT
 
-    object_guid = ctx.user_data["object_guid"]
+    object_guid = ctx.user_data.get("object_guid", "")
     selected    = ctx.user_data.get("selected_types", set())
     other_text  = ctx.user_data.get("other_report_text", "")
+
+    if not selected:
+        await update.message.reply_text("❌ حداقل یک نوع گزارش انتخاب کن.", reply_markup=kb_menu_return())
+        return ST_MAIN_MENU
+
+    if not object_guid:
+        await update.message.reply_text("❌ شناسه کاربر یافت نشد. /start بزن.", reply_markup=kb_menu_return())
+        return ST_MAIN_MENU
 
     if not user or not user.get("rubika_session"):
         await update.message.reply_text("❌ سشن معتبر نیست. /start بزن.", reply_markup=kb_menu_return())
@@ -671,7 +743,7 @@ async def cmd_stop(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("⛔ توقف")
 
 # ────────────────────────────────────────────────────────────────────────
-#  Pipeline — سشن از فایل .session بار می‌شود، نیازی به auth/private_key نیست
+#  Pipeline
 # ────────────────────────────────────────────────────────────────────────
 async def _pipeline(
     tg_id: int,
@@ -689,7 +761,6 @@ async def _pipeline(
             pass
 
     try:
-        # ── client فقط با name ساخته می‌شود — async with => start() => session از فایل بار می‌شود ──
         client = RubikaClient(name=session_path)
         async with client:
             tasks = [
@@ -815,89 +886,26 @@ def build_app() -> Application:
                 CallbackQueryHandler(back_to_menu, pattern="^back_menu$"),
             ],
         },
-        fallbacks=[CommandHandler("start", cmd_start), CommandHandler("stop", cmd_stop)],
+        fallbacks=[
+            CommandHandler("start", cmd_start),
+            CommandHandler("stop", cmd_stop),
+            CallbackQueryHandler(check_join_callback, pattern="^check_join$"),
+        ],
         per_user=True,
         per_chat=True,
         name="rubika_reporter",
     )
 
     app.add_handler(conv)
+    app.add_handler(CallbackQueryHandler(check_join_callback, pattern="^check_join$"))
     app.add_handler(CommandHandler("stop",  cmd_stop))
     app.add_handler(CommandHandler("grant", cmd_grant))
     app.add_handler(CommandHandler("stats", cmd_stats))
     return app
 
 def main() -> None:
-    import json as _json
-    import subprocess
-    import sys
-    import time
-    import urllib.request
-
-    WEBHOOK_PORT   = int(os.environ.get("PORT", 8443))
-    host_webhook_url = os.environ.get("WEBHOOK_URL", "").strip()
-
-    def ngrok_available() -> bool:
-        try:
-            subprocess.run(["ngrok", "version"], capture_output=True, check=True)
-            return True
-        except (FileNotFoundError, subprocess.CalledProcessError):
-            return False
-
-    def get_ngrok_url(port: int, retries: int = 20) -> str:
-        for _ in range(retries):
-            try:
-                with urllib.request.urlopen("http://127.0.0.1:4040/api/tunnels", timeout=2) as r:
-                    data = _json.loads(r.read())
-                for t in data.get("tunnels", []):
-                    if t.get("proto") == "https":
-                        return t["public_url"]
-            except Exception:
-                pass
-            time.sleep(1)
-        raise RuntimeError("ngrok tunnel not found")
-
     app = build_app()
-
-    if host_webhook_url:
-        webhook_url = f"{host_webhook_url.rstrip('/')}/{TELEGRAM_TOKEN}"
-        logger.info("[WEBHOOK] %s port %d", webhook_url, WEBHOOK_PORT)
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=WEBHOOK_PORT,
-            url_path=TELEGRAM_TOKEN,
-            webhook_url=webhook_url,
-            drop_pending_updates=True,
-        )
-        return
-
-    if ngrok_available():
-        ngrok_proc = subprocess.Popen(
-            ["ngrok", "http", str(WEBHOOK_PORT), "--log=stdout"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        logger.info("[NGROK] starting...")
-        time.sleep(2)
-        try:
-            public_url  = get_ngrok_url(WEBHOOK_PORT)
-            webhook_url = f"{public_url}/{TELEGRAM_TOKEN}"
-            logger.info("[NGROK] %s", webhook_url)
-            try:
-                app.run_webhook(
-                    listen="0.0.0.0", port=WEBHOOK_PORT,
-                    url_path=TELEGRAM_TOKEN,
-                    webhook_url=webhook_url,
-                    drop_pending_updates=True,
-                )
-            finally:
-                ngrok_proc.terminate()
-        except RuntimeError as exc:
-            ngrok_proc.terminate()
-            logger.error("ngrok: %s", exc)
-            sys.exit(1)
-        return
-
-    logger.warning("[POLLING] fallback mode")
+    logger.warning("[POLLING] starting...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":

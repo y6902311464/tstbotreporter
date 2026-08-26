@@ -209,7 +209,7 @@ def kb_force_join() -> InlineKeyboardMarkup:
     buttons = []
     for ch in REQUIRED_CHANNELS:
         buttons.append([InlineKeyboardButton(f"📢 @{ch}", url=f"https://t.me/{ch}")])
-    buttons.append([InlineKeyboardButton("✅ بررسی عضویت", style="success", callback_data="check_join")])
+    buttons.append([InlineKeyboardButton("✅ بررسی عضویت", callback_data="check_join")])
     return InlineKeyboardMarkup(buttons)
 
 # ────────────────────────────────────────────────────────────────────────
@@ -288,7 +288,7 @@ async def rubika_sign_in(phone: str, code: str, phone_code_hash: str) -> dict:
 # ────────────────────────────────────────────────────────────────────────
 def kb_phone() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        [[KeyboardButton("📱 ارسال شماره تماس", request_contact=True, style="primary")]],
+        [[KeyboardButton("📱 ارسال شماره تماس", request_contact=True)]],
         resize_keyboard=True,
     )
 
@@ -296,34 +296,30 @@ def kb_main(premium: bool) -> InlineKeyboardMarkup:
     plan_label = "⭐ ویژه" if premium else "🔹 رایگان"
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🚨 گزارش تخلف",    style="danger",  callback_data="start_report"),
-            InlineKeyboardButton("📊 وضعیت حساب",     style="primary", callback_data="account_status"),
+            InlineKeyboardButton("🚨 گزارش تخلف",    callback_data="start_report"),
+            InlineKeyboardButton("📊 وضعیت حساب",     callback_data="account_status"),
         ],
         [
-            InlineKeyboardButton(f"💎 {plan_label}",  style="success", callback_data="subscription"),
-            InlineKeyboardButton("🎁 جایزه روزانه",   style="success", callback_data="daily_reward"),
+            InlineKeyboardButton(f"💎 {plan_label}",  callback_data="subscription"),
+            InlineKeyboardButton("🎁 جایزه روزانه",   callback_data="daily_reward"),
         ],
         [
-            InlineKeyboardButton("👥 دعوت دوستان",    style="primary", callback_data="invite"),
-            InlineKeyboardButton("❓ راهنما",          style="primary", callback_data="help"),
+            InlineKeyboardButton("👥 دعوت دوستان",    callback_data="invite"),
+            InlineKeyboardButton("❓ راهنما",          callback_data="help"),
         ],
     ])
 
 def kb_menu_return() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔙 بازگشت", style="primary", callback_data="back_menu")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="back_menu")],
     ])
 
 def kb_report_types(selected: set[str]) -> InlineKeyboardMarkup:
-    styles = {
-        "1": "danger", "2": "danger", "3": "success",
-        "4": "danger", "5": "primary", "6": "danger", "7": "primary",
-    }
     buttons = []
     for k, (label, _) in REPORT_TYPES_MAP.items():
         mark = "✅" if k in selected else "⬜"
-        buttons.append([InlineKeyboardButton(f"{mark} {label}", style=styles.get(k, "primary"), callback_data=f"rt_{k}")])
-    buttons.append([InlineKeyboardButton("▶️ شروع گزارش", style="success", callback_data="rt_confirm")])
+        buttons.append([InlineKeyboardButton(f"{mark} {label}", callback_data=f"rt_{k}")])
+    buttons.append([InlineKeyboardButton("▶️ شروع گزارش", callback_data="rt_confirm")])
     return InlineKeyboardMarkup(buttons)
 
 # ────────────────────────────────────────────────────────────────────────

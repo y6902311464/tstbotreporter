@@ -1091,7 +1091,7 @@ def build_app() -> tuple[Bot, Dispatcher]:
 
     # ── پیام‌ها ──
     router.message.register(cmd_start, CommandStart())
-    router.message.register(receive_phone, Form.phone, F.contact | (F.text & ~Command()))
+    router.message.register(receive_phone, Form.phone, F.contact | (F.text & ~F.text.startswith("/")))
     router.message.register(receive_password, Form.password, F.text & ~Command())
     router.message.register(receive_code, Form.code, F.text & ~Command())
     router.message.register(receive_guid, Form.report_guid, F.text & ~Command())

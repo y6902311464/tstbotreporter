@@ -1090,49 +1090,19 @@ def build_app() -> tuple[Bot, Dispatcher]:
     router = Router()
 
    # ── پیام‌ها ──
-router.message.register(cmd_start, CommandStart())
+    # ── پیام‌ها ──
+    router.message.register(cmd_start, CommandStart())
+    router.message.register(receive_phone, Form.phone, F.contact | (F.text & ~F.text.startswith("/")))
+    router.message.register(receive_password, Form.password, F.text & ~F.text.startswith("/"))
+    router.message.register(receive_code, Form.code, F.text & ~F.text.startswith("/"))
+    router.message.register(receive_guid, Form.report_guid, F.text & ~F.text.startswith("/"))
+    router.message.register(receive_other_text, Form.report_other_text, F.text & ~F.text.startswith("/"))
+    router.message.register(receive_count, Form.report_count, F.text & ~F.text.startswith("/"))
+    router.message.register(receive_receipt, Form.receipt)
+    router.message.register(cmd_stop, Command("stop"))
+    router.message.register(cmd_grant, Command("grant"))
+    router.message.register(cmd_stats, Command("stats"))
 
-router.message.register(
-    receive_phone,
-    Form.phone,
-    F.contact | (F.text & ~F.text.startswith("/"))
-)
-
-router.message.register(
-    receive_password,
-    Form.password,
-    F.text & ~F.text.startswith("/")
-)
-
-router.message.register(
-    receive_code,
-    Form.code,
-    F.text & ~F.text.startswith("/")
-)
-
-router.message.register(
-    receive_guid,
-    Form.report_guid,
-    F.text & ~F.text.startswith("/")
-)
-
-router.message.register(
-    receive_other_text,
-    Form.report_other_text,
-    F.text & ~F.text.startswith("/")
-)
-
-router.message.register(
-    receive_count,
-    Form.report_count,
-    F.text & ~F.text.startswith("/")
-)
-
-router.message.register(receive_receipt, Form.receipt)
-
-router.message.register(cmd_stop, Command("stop"))
-router.message.register(cmd_grant, Command("grant"))
-router.message.register(cmd_stats, Command("stats"))
     # ── کالبک‌ها ──
     router.callback_query.register(process_callback, Form.main_menu)
     router.callback_query.register(process_callback, Form.report_types)

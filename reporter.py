@@ -21,6 +21,7 @@ from rubpy.crypto import Crypto
 from rubpy.enums import ReportType
 
 from aiogram import Bot, Dispatcher, F, Router
+from aiogram.types import Update
 from aiogram.enums import ButtonStyle, ChatMemberStatus
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
@@ -359,18 +360,18 @@ def kb_report_guid_choice() -> InlineKeyboardMarkup:
             InlineKeyboardButton(
                 text="🔍 دریافت شناسه با یوزرنیم/آیدی",
                 callback_data="get_by_username",
-                style=ButtonStyle.PRIMARY,
+                style=ButtonStyle.DANGER,
             )
         ],
         [
             InlineKeyboardButton(
                 text="✍️ وارد کردن شناسه دستی",
                 callback_data="enter_guid",
-                style=ButtonStyle.SECONDARY,
+                style=ButtonStyle.PRIMARY,
             )
         ],
         [
-            InlineKeyboardButton(text="🔙 بازگشت", callback_data="back_menu", style=ButtonStyle.SECONDARY),
+            InlineKeyboardButton(text="🔙 بازگشت", callback_data="back_menu", style=ButtonStyle.PRIMARY),
         ],
     ])
 
@@ -606,6 +607,8 @@ async def process_callback(callback: CallbackQuery, state: FSMContext) -> None:
     tg_id = callback.from_user.id
     bot  = callback.bot
     user = get_user(tg_id)
+    logger.warning("CALLBACK data=%s from=%s state=%s has_user=%s",
+                   data, tg_id, await state.get_state(), bool(user))
 
     if data == "back_menu":
         premium = is_premium_active(user) if user else False
@@ -1109,7 +1112,7 @@ async def admin_approve_sub(callback: CallbackQuery) -> None:
     if data.startswith("approve_sub_"):
         target_id = int(data.split("_")[-1])
         set_premium(target_id, PREMIUM_MONTHS)
-        await callback.message.edit_text(f"✅ اشتراک فعال شد!\n👤 کاربر: {target_id}")
+        await callback.message.edit_caption(caption=f"✅ اشتراک فعال شد!\n👤 کاربر: {target_id}", reply_markup=None)
         try:
             user = get_user(target_id)
             premium_until = user.get("premium_until", "")[:10] if user else ""
@@ -1126,7 +1129,7 @@ async def admin_approve_sub(callback: CallbackQuery) -> None:
 
     elif data.startswith("reject_sub_"):
         target_id = int(data.split("_")[-1])
-        await callback.message.edit_text(f"❌ درخواست رد شد.\n👤 کاربر: {target_id}")
+        await callback.message.edit_caption(caption=f"❌ درخواست رد شد.\n👤 کاربر: {target_id}", reply_markup=None)
         try:
             await callback.bot.send_message(
                 chat_id=target_id,
@@ -1264,6 +1267,21 @@ async def cmd_stats(message: Message) -> None:
 
 
 # ────────────────────────────────────────────────────────────────────────
+#  Global error handler (برای دیدن خطای کالبک‌ها)
+# ────────────────────────────────────────────────────────────────────────
+async def global_error_handler(update: Update, exception: Exception) -> bool:
+    logger.exception("UNHANDLED EXCEPTION: %s", exception)
+    try:
+        if update.callback_query:
+            await update.callback_query.answer(f"❌ خطا:\n{exception}", show_alert=True)
+        elif update.message:
+            await update.message.answer(f"❌ خطا:\n{exception}")
+    except Exception:
+        pass
+    return True
+
+
+# ────────────────────────────────────────────────────────────────────────
 #  Main
 # ────────────────────────────────────────────────────────────────────────
 def build_app() -> tuple[Bot, Dispatcher]:
@@ -1311,6 +1329,7 @@ def build_app() -> tuple[Bot, Dispatcher]:
     router.callback_query.register(process_callback)
 
     dp.include_router(router)
+    dp.errors.register(global_error_handler)
     return bot, dp
 
 

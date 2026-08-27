@@ -90,6 +90,10 @@ class Form(StatesGroup):
     report_delay     = State()
     report_accounts  = State()
     receipt          = State()
+    support_message  = State()
+    admin_panel      = State()
+    broadcast        = State()
+    admin_reply      = State()
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -154,6 +158,17 @@ def add_stats(telegram_id: int, sent: int) -> None:
             (sent, telegram_id),
         )
         conn.commit()
+
+def get_all_users() -> list[dict]:
+    """تمام کاربران ثبت‌شده در ربات را برمی‌گرداند."""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT * FROM users").fetchall()
+    return [dict(r) for r in rows]
+
+def count_users() -> int:
+    with sqlite3.connect(DB_PATH) as conn:
+        return conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
 
 def get_all_valid_sessions() -> list[str]:
     """تمام سشن‌های معتبر (فایل موجود) اضافه‌شده به ربات را برمی‌گرداند."""
@@ -335,7 +350,7 @@ def kb_phone() -> ReplyKeyboardMarkup:
     )
 
 def kb_main(premium: bool) -> InlineKeyboardMarkup:
-    plan_label = "⭐ ویژه" if premium else "🔹 رایگان"
+    plan_label = "⭐ ویژه" if premium else "🔹خرید اشتراک"
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="🚨 گزارش تخلف", callback_data="start_report", style=ButtonStyle.DANGER),
@@ -349,11 +364,44 @@ def kb_main(premium: bool) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🔗 لینک دعوت", callback_data="referral_link", style=ButtonStyle.PRIMARY),
             InlineKeyboardButton(text="❓ راهنما", callback_data="help", style=ButtonStyle.PRIMARY),
         ],
+        [
+            InlineKeyboardButton(text="📞 ارتباط با ما / پشتیبانی", callback_data="support", style=ButtonStyle.DANGER),
+        ],
     ])
 
 def kb_menu_return() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔙 بازگشت", callback_data="back_menu", style=ButtonStyle.PRIMARY)],
+    ])
+
+
+def kb_admin_panel() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="📢 پیام همگانی", callback_data="admin_broadcast", style=ButtonStyle.SUCCESS),
+            InlineKeyboardButton(text="📊 آمار ربات", callback_data="admin_stats", style=ButtonStyle.PRIMARY),
+        ],
+        [
+            InlineKeyboardButton(text="👑 تمدید اشتراک", callback_data="admin_grant", style=ButtonStyle.SUCCESS),
+            InlineKeyboardButton(text="💬 پشتیبانی", callback_data="admin_support", style=ButtonStyle.DANGER),
+        ],
+        [
+            InlineKeyboardButton(text="📨 لیست کاربران", callback_data="admin_list", style=ButtonStyle.PRIMARY),
+            InlineKeyboardButton(text="🚪 خروج از پنل", callback_data="admin_exit", style=ButtonStyle.DANGER),
+        ],
+    ])
+
+
+def kb_support() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 بازگشت", callback_data="back_menu", style=ButtonStyle.PRIMARY)],
+    ])
+
+
+def kb_admin_reply(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💬 پاسخ به کاربر", callback_data=f"admin_reply_{user_id}", style=ButtonStyle.PRIMARY)],
+        [InlineKeyboardButton(text="🚫 بستن", callback_data="admin_close_ticket", style=ButtonStyle.DANGER)],
     ])
 
 def kb_report_types(selected: set) -> InlineKeyboardMarkup:
@@ -775,6 +823,16 @@ async def process_callback(callback: CallbackQuery, state: FSMContext) -> None:
             f"   ۱ ساعت اشتراک رایگان دریافت می‌کنید!",
             reply_markup=kb_menu_return(),
         )
+        return
+
+    if data == "support":
+        await callback.message.answer(
+            "📞 ارتباط با ما / پشتیبانی\n\n"
+            "پیام، عکس، فیلم یا فایل خود را بفرستید تا برای پشتیبانی ارسال شود.\n"
+            "پشتیبانی در اسرع وقت پاسخ می‌دهد.",
+            reply_markup=kb_support(),
+        )
+        await state.set_state(Form.support_message)
         return
 
     if data == "daily_reward":
@@ -1345,6 +1403,206 @@ async def cmd_stats(message: Message) -> None:
 
 
 # ────────────────────────────────────────────────────────────────────────
+#  Support (ارتباط با ما / پشتیبانی)
+# ────────────────────────────────────────────────────────────────────────
+async def receive_support_message(message: Message, state: FSMContext) -> None:
+    tg_id = message.from_user.id
+    user  = get_user(tg_id)
+
+    sent = False
+    for admin_id in ADMIN_IDS:
+        try:
+            forwarded = await message.forward(chat_id=admin_id)
+            await forwarded.reply(
+                f"📨 پیام پشتیبانی جدید\n"
+                f"👤 کاربر: {user.get('phone', '-') if user else '-'}\n"
+                f"🆔 تلگرام: {tg_id}",
+                reply_markup=kb_admin_reply(tg_id),
+            )
+            sent = True
+        except Exception as exc:
+            logger.error("forward support to admin %d: %s", admin_id, exc)
+
+    if sent:
+        await message.answer(
+            "✅ پیام شما برای پشتیبانی ارسال شد.\n"
+            "منتظر پاسخ بمانید؛ پاسخ از همینجا برایتان ارسال می‌شود.",
+            reply_markup=kb_menu_return(),
+        )
+    else:
+        await message.answer("❌ ارسال پیام به پشتیبانی ممکن نشد. بعداً تلاش کنید.")
+    await state.set_state(Form.main_menu)
+
+
+async def admin_reply_to_user(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("⛔ فقط ادمین", show_alert=True)
+        return
+    target_id = int(callback.data.split("_")[-1])
+    await state.update_data(reply_target=target_id)
+    await state.set_state(Form.admin_reply)
+    await callback.message.answer(
+        f"💬 در حال پاسخ به کاربر {target_id}\n"
+        "پیام، عکس یا فایل خود را بفرستید تا برای کاربر ارسال شود:",
+        reply_markup=kb_menu_return(),
+    )
+
+
+async def receive_admin_reply(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+
+    if data.get("grant_mode"):
+        await state.update_data(grant_mode=False)
+        parts = (message.text or "").split()
+        try:
+            target_id = int(parts[0])
+            months = int(parts[1]) if len(parts) > 1 else 1
+            set_premium(target_id, months)
+            await message.answer(f"✅ اشتراک {months} ماهه برای {target_id} فعال شد.", reply_markup=kb_admin_panel())
+        except (ValueError, IndexError):
+            await message.answer("❌ فرمت نادرست. مثال: 123456789 1", reply_markup=kb_admin_panel())
+        await state.set_state(Form.admin_panel)
+        return
+
+    target_id = data.get("reply_target")
+    if not target_id:
+        return
+    try:
+        await message.forward(chat_id=target_id)
+        await message.answer("✅ پاسخ برای کاربر ارسال شد.", reply_markup=kb_admin_panel())
+    except Exception as exc:
+        logger.error("admin reply to %d: %s", target_id, exc)
+        await message.answer(f"❌ ارسال پاسخ ناموفق: {exc}", reply_markup=kb_admin_panel())
+    await state.set_state(Form.admin_panel)
+
+
+# ────────────────────────────────────────────────────────────────────────
+#  Admin panel
+# ────────────────────────────────────────────────────────────────────────
+async def cmd_admin(message: Message, state: FSMContext) -> None:
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    await message.answer("🛠 پنل مدیریت", reply_markup=kb_admin_panel())
+    await state.set_state(Form.admin_panel)
+
+
+async def admin_panel_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("⛔ فقط ادمین", show_alert=True)
+        return
+    data = callback.data
+    bot  = callback.bot
+
+    if data == "admin_exit":
+        await callback.message.answer("🚪 خروج از پنل.", reply_markup=kb_menu_return())
+        await state.set_state(Form.main_menu)
+        return
+
+    if data == "admin_broadcast":
+        await callback.message.answer(
+            "📢 پیام همگانی\n"
+            "پیام، عکس یا فایل خود را بفرستید تا به تمام کاربران ربات ارسال شود:",
+            reply_markup=kb_menu_return(),
+        )
+        await state.set_state(Form.broadcast)
+        return
+
+    if data == "admin_stats":
+        total = count_users()
+        users = get_all_users()
+        prem  = sum(1 for u in users if is_premium_active(u))
+        reps  = sum(u.get("total_reports", 0) for u in users)
+        with sqlite3.connect(DB_PATH) as conn:
+            sess = conn.execute(
+                "SELECT COUNT(*) FROM users WHERE rubika_session IS NOT NULL"
+            ).fetchone()[0]
+        await callback.message.answer(
+            f"📊 آمار ربات\n\n"
+            f"👥 کل کاربران: {total}\n"
+            f"👑 اشتراکی‌ها: {prem}\n"
+            f"🔐 سشن‌های فعال: {sess}\n"
+            f"📢 کل گزارشات: {reps}",
+            reply_markup=kb_admin_panel(),
+        )
+        return
+
+    if data == "admin_grant":
+        await callback.message.answer(
+            "👑 تمدید اشتراک\n"
+            "فرمت: <telegram_id> <months>\nمثال: 123456789 1",
+            reply_markup=kb_menu_return(),
+        )
+        await state.set_state(Form.admin_reply)
+        await state.update_data(grant_mode=True)
+        return
+
+    if data == "admin_support":
+        await callback.message.answer(
+            "💬 پشتیبانی\n"
+            "وقتی کاربری پیام پشتیبانی بفرستد، پیام همراه با دکمه «پاسخ» برایتان فوروارد می‌شود.\n"
+            "روی «پاسخ به کاربر» بزنید و پاسخ را بفرستید.",
+            reply_markup=kb_admin_panel(),
+        )
+        return
+
+    if data == "admin_list":
+        users = get_all_users()
+        if not users:
+            await callback.message.answer("هیچ کاربری ثبت نشده.", reply_markup=kb_admin_panel())
+            return
+        lines = []
+        for u in users[-30:]:
+            pid = u.get("telegram_id")
+            phone = u.get("phone", "-")
+            prem = "👑" if is_premium_active(u) else "🆓"
+            lines.append(f"{prem} {pid} | {phone}")
+        text = "📨 لیست کاربران (آخرین ۳۰ نفر):\n" + "\n".join(lines)
+        await callback.message.answer(text, reply_markup=kb_admin_panel())
+        return
+
+
+async def receive_broadcast(message: Message, state: FSMContext) -> None:
+    users = get_all_users()
+    total = len(users)
+    success = 0
+    fail = 0
+    await message.answer(f"📤 در حال ارسال پیام همگانی به {total} کاربر...")
+    for u in users:
+        uid = u.get("telegram_id")
+        if not uid:
+            continue
+        try:
+            await message.forward(chat_id=uid)
+            success += 1
+        except Exception:
+            fail += 1
+        await asyncio.sleep(0.05)
+    await message.answer(
+        f"✅ پیام همگانی ارسال شد.\nموفق: {success}\nناموفق: {fail}",
+        reply_markup=kb_admin_panel(),
+    )
+    await state.set_state(Form.admin_panel)
+
+
+async def cmd_reply(message: Message) -> None:
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        await message.answer("/reply <telegram_id> متن پاسخ")
+        return
+    target_id = int(parts[1])
+    text = message.text[len(parts[0]) + len(parts[1]) + 2:].strip()
+    try:
+        await message.bot.send_message(chat_id=target_id, text=f"💬 پاسخ پشتیبانی:\n{text}")
+        await message.answer("✅ پاسخ ارسال شد.")
+    except Exception as exc:
+        await message.answer(f"❌ خطا: {exc}")
+
+
+# ────────────────────────────────────────────────────────────────────────
 #  Global error handler (برای دیدن خطای کالبک‌ها)
 # ────────────────────────────────────────────────────────────────────────
 async def global_error_handler(update: Update, exception: Exception) -> bool:
@@ -1381,9 +1639,14 @@ def build_app() -> tuple[Bot, Dispatcher]:
     router.message.register(receive_delay, Form.report_delay, F.text & ~F.text.startswith("/"))
     router.message.register(receive_accounts, Form.report_accounts, F.text & ~F.text.startswith("/"))
     router.message.register(receive_receipt, Form.receipt)
+    router.message.register(receive_support_message, Form.support_message)
+    router.message.register(receive_broadcast, Form.broadcast)
+    router.message.register(receive_admin_reply, Form.admin_reply)
     router.message.register(cmd_stop, Command("stop"))
     router.message.register(cmd_grant, Command("grant"))
     router.message.register(cmd_stats, Command("stats"))
+    router.message.register(cmd_admin, Command("admin", "panel"))
+    router.message.register(cmd_reply, Command("reply"))
 
     # ── کالبک‌ها ──
     # هندلرهای خاص را اول ثبت کن (اولویت بالاتر) تا توسط process_callback سایه نشوند
@@ -1401,6 +1664,14 @@ def build_app() -> tuple[Bot, Dispatcher]:
     router.callback_query.register(back_to_menu, Form.report_accounts, F.data == "back_menu")
     router.callback_query.register(back_to_menu, Form.receipt, F.data == "back_menu")
     router.callback_query.register(back_to_menu, Form.report_guid, F.data == "back_menu")
+    router.callback_query.register(back_to_menu, Form.support_message, F.data == "back_menu")
+    router.callback_query.register(back_to_menu, Form.admin_panel, F.data == "back_menu")
+    router.callback_query.register(back_to_menu, Form.broadcast, F.data == "back_menu")
+    router.callback_query.register(back_to_menu, Form.admin_reply, F.data == "back_menu")
+
+    # ── ادمین ──
+    router.callback_query.register(admin_reply_to_user, F.data.startswith("admin_reply_"))
+    router.callback_query.register(admin_panel_callback, F.data.startswith("admin_"))
 
     # fallback: اگر استیت از دست رفته باشد (مثلاً بعد از ری‌استارت بات)
     # باز هم دکمه‌ها جواب بدهند

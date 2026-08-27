@@ -322,13 +322,13 @@ def kb_main(premium: bool) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(text="🔗 لینک دعوت", callback_data="referral_link", style=ButtonStyle.PRIMARY),
-            InlineKeyboardButton(text="❓ راهنما", callback_data="help", style=ButtonStyle.SECONDARY),
+            InlineKeyboardButton(text="❓ راهنما", callback_data="help", style=ButtonStyle.PRIMARY),
         ],
     ])
 
 def kb_menu_return() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔙 بازگشت", callback_data="back_menu", style=ButtonStyle.SECONDARY)],
+        [InlineKeyboardButton(text="🔙 بازگشت", callback_data="back_menu", style=ButtonStyle.PRIMARY)],
     ])
 
 def kb_report_types(selected: set) -> InlineKeyboardMarkup:

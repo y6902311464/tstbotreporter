@@ -82,9 +82,12 @@ class Form(StatesGroup):
     code             = State()
     main_menu        = State()
     report_guid      = State()
+    report_resolve   = State()
     report_types     = State()
     report_other_text = State()
     report_count     = State()
+    report_delay     = State()
+    report_accounts  = State()
     receipt          = State()
 
 
@@ -150,6 +153,15 @@ def add_stats(telegram_id: int, sent: int) -> None:
             (sent, telegram_id),
         )
         conn.commit()
+
+def get_all_valid_sessions() -> list[str]:
+    """تمام سشن‌های معتبر (فایل موجود) اضافه‌شده به ربات را برمی‌گرداند."""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT rubika_session FROM users WHERE rubika_session IS NOT NULL"
+        ).fetchall()
+    return [r["rubika_session"] for r in rows if session_exists(r["rubika_session"])]
 
 def is_premium_active(user: dict) -> bool:
     if not user.get("is_premium"):
@@ -341,8 +353,44 @@ def kb_report_types(selected: set) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-# ────────────────────────────────────────────────────────────────────────
-#  Handlers
+def kb_report_guid_choice() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="🔍 دریافت شناسه با یوزرنیم/آیدی",
+                callback_data="get_by_username",
+                style=ButtonStyle.PRIMARY,
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="✍️ وارد کردن شناسه دستی",
+                callback_data="enter_guid",
+                style=ButtonStyle.SECONDARY,
+            )
+        ],
+        [
+            InlineKeyboardButton(text="🔙 بازگشت", callback_data="back_menu", style=ButtonStyle.SECONDARY),
+        ],
+    ])
+
+
+async def resolve_object_guid(session_path: str, text: str) -> Optional[str]:
+    """متن را می‌گیرد: اگر خودش شناسه باشد برمی‌گرداند، وگرنه با یوزرنیم حل می‌کند."""
+    text = text.strip().lstrip("@").strip()
+    if re.match(r"^[a-zA-Z0-9_\-]{10,64}$", text):
+        return text
+    try:
+        client = RubikaClient(name=session_path)
+        async with client:
+            result = await client.get_object_by_username(text)
+            guid = result.user_guid
+            if not guid:
+                guid = result.object_guid
+            return guid if guid else None
+    except Exception as exc:
+        logger.error("resolve_object_guid: %s", exc)
+        return None
 # ────────────────────────────────────────────────────────────────────────
 async def cmd_start(message: Message, command: CommandStart, state: FSMContext) -> None:
     bot = message.bot
@@ -576,6 +624,24 @@ async def process_callback(callback: CallbackQuery, state: FSMContext) -> None:
             await state.set_state(Form.main_menu)
             return
         await callback.message.answer(
+            "🎯 چطور شناسه هدف را وارد کنیم؟\n\n"
+            "• اگر یوزرنیم/آیدی (مثل @username) را داری، ربات خودش شناسه را پیدا می‌کند.\n"
+            "• یا شناسه (object_guid) را دستی بفرست.",
+            reply_markup=kb_report_guid_choice(),
+        )
+        await state.set_state(Form.report_guid)
+        return
+
+    if data == "get_by_username":
+        await callback.message.answer(
+            "👤 یوزرنیم یا آیدی روبیکا را بفرست:\nمثال: @username یا username",
+            reply_markup=kb_menu_return(),
+        )
+        await state.set_state(Form.report_resolve)
+        return
+
+    if data == "enter_guid":
+        await callback.message.answer(
             "🎯 شناسه (object_guid) کاربر روبیکا را بفرست:\n\n"
             "مثال: u0A1bC2dE3fG4hI5jK6lM7nO8pQ9rS0T",
             reply_markup=kb_menu_return(),
@@ -624,8 +690,10 @@ async def process_callback(callback: CallbackQuery, state: FSMContext) -> None:
             "❓ راهنما\n\n"
             "1. شناسه کاربر روبیکا را بفرست\n"
             "2. نوع گزارش را انتخاب کن\n"
-            "3. تعداد را بگو\n"
-            "4. گزارش‌ها خودکار ارسال می‌شوند\n\n"
+            "3. تعداد گزارش از هر نوع را بگو\n"
+            "4. فاصله (ثانیه) بین هر گزارش را بگو\n"
+            "5. تعداد اکانت‌های ربات برای گزارش را بگو\n"
+            "6. گزارش‌ها با همه اکانت‌ها خودکار ارسال می‌شوند\n\n"
             f"🆓 رایگان: {FREE_LIMIT} گزارش\n"
             f"💎 اشتراکی: {PREMIUM_LIMIT} گزارش\n\n"
             "برای توقف /stop",
@@ -781,6 +849,44 @@ async def receive_guid(message: Message, state: FSMContext) -> None:
     await state.set_state(Form.report_types)
 
 
+async def receive_resolve(message: Message, state: FSMContext) -> None:
+    text = message.text.strip()
+    tg_id = message.from_user.id
+    user = get_user(tg_id)
+
+    if not user or not user.get("rubika_session"):
+        await message.answer("❌ سشن معتبر نیست. /start بزن.", reply_markup=kb_menu_return())
+        await state.set_state(Form.main_menu)
+        return
+
+    session_path = user["rubika_session"]
+    if not session_exists(session_path):
+        await message.answer("❌ سشن منقضی شده. /start بزن.", reply_markup=kb_menu_return())
+        upsert_user(tg_id, rubika_session=None, rubika_auth=None, rubika_private_key=None)
+        await state.set_state(Form.main_menu)
+        return
+
+    await message.answer("⏳ در حال جستجوی شناسه...")
+
+    guid = await resolve_object_guid(session_path, text)
+    if not guid:
+        await message.answer(
+            "❌ شناسه‌ای برای این یوزرنیم/آیدی پیدا نشد.\n"
+            "یا یوزرنیم را درست وارد کن، یا «وارد کردن شناسه دستی» را انتخاب کن.",
+            reply_markup=kb_report_guid_choice(),
+        )
+        await state.set_state(Form.report_guid)
+        return
+
+    await state.update_data(object_guid=guid, selected_types=set())
+    await message.answer(
+        f"✅ شناسه پیدا شد:\n<code>{guid}</code>\n\nنوع گزارش را انتخاب کن:",
+        reply_markup=kb_report_types(set()),
+        parse_mode="HTML",
+    )
+    await state.set_state(Form.report_types)
+
+
 async def receive_other_text(message: Message, state: FSMContext) -> None:
     text = message.text.strip()
     tg_id = message.from_user.id
@@ -824,8 +930,77 @@ async def receive_count(message: Message, state: FSMContext) -> None:
         await message.answer(msg + "\nعدد کمتر:", reply_markup=kb_menu_return())
         return
 
+    await state.update_data(count=count)
+    await message.answer(
+        "⏱️ هر چند ثانیه یک گزارش ارسال شود؟\nمثال: ۳",
+        reply_markup=kb_menu_return(),
+    )
+    await state.set_state(Form.report_delay)
+    return
+
+
+async def receive_delay(message: Message, state: FSMContext) -> None:
+    text = message.text.strip()
+    tg_id = message.from_user.id
+    user = get_user(tg_id)
+
+    if not text.isdigit() or int(text) < 1:
+        await message.answer("❌ عدد مثبت (ثانیه) وارد کن.", reply_markup=kb_menu_return())
+        return
+
+    delay = int(text)
+    all_sessions = get_all_valid_sessions()
+    total = len(all_sessions)
+
+    if total == 0:
+        await message.answer(
+            "❌ هیچ اکانتی در ربات ثبت نشده. ابتدا حداقل یک حساب روبیکا اضافه کن.",
+            reply_markup=kb_menu_return(),
+        )
+        await state.set_state(Form.main_menu)
+        return
+
+    await state.update_data(report_delay_delay=delay)
+    await message.answer(
+        f"👥 تعداد کل اکانت‌های ثبت‌شده در ربات: {total}\n"
+        f"با چند اکانت (سشن) گزارش بزنم؟ (۱ تا {total})",
+        reply_markup=kb_menu_return(),
+    )
+    await state.set_state(Form.report_accounts)
+    return
+
+
+async def receive_accounts(message: Message, state: FSMContext) -> None:
+    text = message.text.strip()
+    tg_id = message.from_user.id
+    user = get_user(tg_id)
+
+    if not text.isdigit() or int(text) < 1:
+        await message.answer("❌ عدد مثبت وارد کن.", reply_markup=kb_menu_return())
+        return
+
+    all_sessions = get_all_valid_sessions()
+    total = len(all_sessions)
+    if total == 0:
+        await message.answer(
+            "❌ هیچ اکانتی در ربات ثبت نشده. ابتدا حداقل یک حساب روبیکا اضافه کن.",
+            reply_markup=kb_menu_return(),
+        )
+        await state.set_state(Form.main_menu)
+        return
+
+    num_accounts = int(text)
+    if num_accounts > total:
+        await message.answer(
+            f"❌ فقط {total} اکانت در ربات موجود است. عدد کمتر:",
+            reply_markup=kb_menu_return(),
+        )
+        return
+
     state_data = await state.get_data()
     object_guid = state_data.get("object_guid", "")
+    count       = state_data.get("count", 0)
+    delay       = state_data.get("report_delay_delay", REPORT_DELAY)
     selected    = state_data.get("selected_types", set())
     other_text  = state_data.get("other_report_text", "")
 
@@ -839,40 +1014,34 @@ async def receive_count(message: Message, state: FSMContext) -> None:
         await state.set_state(Form.main_menu)
         return
 
-    if not user or not user.get("rubika_session"):
-        await message.answer("❌ سشن معتبر نیست. /start بزن.", reply_markup=kb_menu_return())
-        await state.set_state(Form.main_menu)
-        return
-
-    session_path = user["rubika_session"]
-    if not session_exists(session_path):
-        await message.answer("❌ سشن منقضی شده. /start بزن.", reply_markup=kb_menu_return())
-        upsert_user(tg_id, rubika_session=None, rubika_auth=None, rubika_private_key=None)
-        await state.set_state(Form.main_menu)
-        return
+    session_paths = all_sessions[:num_accounts]
 
     selected_types = [
         (REPORT_TYPES_MAP[k][0], REPORT_TYPES_MAP[k][1], other_text if k == "7" else "")
         for k in selected
     ]
 
-    await state.update_data(object_guid=None, selected_types=None, other_report_text=None)
+    await state.update_data(object_guid=None, selected_types=None, other_report_text=None,
+                            count=None, report_delay_delay=None)
 
     await message.answer(
-        f"🚀 ارسال {count} گزارش برای {len(selected_types)} نوع...\n⛔ /stop برای توقف"
+        f"🚀 ارسال {count} گزارش (هر {delay} ثانیه) با {num_accounts} اکانت...\n"
+        f"⛔ /stop برای توقف"
     )
 
     asyncio.create_task(
         _pipeline(
             tg_id=tg_id,
-            session_path=session_path,
+            session_paths=session_paths,
             object_guid=object_guid,
             selected_types=selected_types,
             count=count,
+            delay=delay,
             status_message=message,
         )
     )
     await state.set_state(Form.main_menu)
+    return
 
 
 async def cmd_stop(message: Message) -> None:
@@ -972,10 +1141,11 @@ async def admin_approve_sub(callback: CallbackQuery) -> None:
 # ────────────────────────────────────────────────────────────────────────
 async def _pipeline(
     tg_id: int,
-    session_path: str,
+    session_paths: list[str],
     object_guid: str,
     selected_types: list[tuple[str, ReportType, str]],
     count: int,
+    delay: int,
     status_message: Message,
 ) -> None:
     user_stop[tg_id] = False
@@ -986,30 +1156,37 @@ async def _pipeline(
         except Exception:
             pass
 
-    try:
-        client = RubikaClient(name=session_path)
-        async with client:
-            tasks = [
-                asyncio.create_task(
-                    _single_loop(client, object_guid, rt_enum, other_text, count, label, tg_id)
-                )
-                for label, rt_enum, other_text in selected_types
-            ]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-    except Exception as exc:
-        logger.error("pipeline error: %s", exc)
-        await reply(f"❌ خطا: {exc}")
+    if not session_paths:
+        await reply("❌ هیچ سشن معتبری برای گزارش یافت نشد.")
         return
+
+    n = len(session_paths)
 
     total_sent = 0
     lines = []
-    for r in results:
-        if isinstance(r, Exception):
-            lines.append(f"❌ خطا: {r}")
-        else:
-            label, sent, failed = r
-            total_sent += sent
-            lines.append(f"✅ {label}: {sent} ارسال | {failed} ناموفق")
+    for label, rt_enum, other_text in selected_types:
+        # توزیع تعداد گزارش‌ها بین سشن‌ها
+        per = count // n
+        rem = count % n
+        tasks = []
+        for idx, sp in enumerate(session_paths):
+            c = per + (1 if idx < rem else 0)
+            if c > 0:
+                tasks.append(asyncio.create_task(
+                    _single_loop(sp, object_guid, rt_enum, other_text, c, delay, label, tg_id)
+                ))
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        sent = 0
+        failed = 0
+        for r in results:
+            if isinstance(r, Exception):
+                lines.append(f"❌ خطا ({label}): {r}")
+            else:
+                s, f = r
+                sent += s
+                failed += f
+        total_sent += sent
+        lines.append(f"✅ {label}: {sent} ارسال | {failed} ناموفق")
 
     add_stats(tg_id, total_sent)
     user    = get_user(tg_id)
@@ -1024,31 +1201,37 @@ async def _pipeline(
 
 
 async def _single_loop(
-    client: RubikaClient,
+    session_path: str,
     object_guid: str,
     report_type_enum: ReportType,
     other_text: str,
     count: int,
+    delay: int,
     label: str,
     tg_id: int,
-) -> tuple[str, int, int]:
+) -> tuple[int, int]:
     sent   = 0
     failed = 0
-    for i in range(1, count + 1):
-        if user_stop.get(tg_id):
-            break
-        try:
-            if report_type_enum == ReportType.OTHER:
-                await client.report_object(object_guid, report_type_enum, description=other_text)
-            else:
-                await client.report_object(object_guid, report_type_enum)
-            sent += 1
-        except Exception as exc:
-            failed += 1
-            logger.error("[%s][%d/%d] %s", label, i, count, exc)
-        if i < count:
-            await asyncio.sleep(REPORT_DELAY)
-    return label, sent, failed
+    try:
+        client = RubikaClient(name=session_path)
+        async with client:
+            for i in range(1, count + 1):
+                if user_stop.get(tg_id):
+                    break
+                try:
+                    if report_type_enum == ReportType.OTHER:
+                        await client.report_object(object_guid, report_type_enum, description=other_text)
+                    else:
+                        await client.report_object(object_guid, report_type_enum)
+                    sent += 1
+                except Exception as exc:
+                    failed += 1
+                    logger.error("[%s][%d/%d] %s", label, i, count, exc)
+                if i < count:
+                    await asyncio.sleep(delay)
+    except Exception as exc:
+        logger.error("session %s error: %s", session_path, exc)
+    return sent, failed
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -1096,8 +1279,11 @@ def build_app() -> tuple[Bot, Dispatcher]:
     router.message.register(receive_password, Form.password, F.text & ~F.text.startswith("/"))
     router.message.register(receive_code, Form.code, F.text & ~F.text.startswith("/"))
     router.message.register(receive_guid, Form.report_guid, F.text & ~F.text.startswith("/"))
+    router.message.register(receive_resolve, Form.report_resolve, F.text & ~F.text.startswith("/"))
     router.message.register(receive_other_text, Form.report_other_text, F.text & ~F.text.startswith("/"))
     router.message.register(receive_count, Form.report_count, F.text & ~F.text.startswith("/"))
+    router.message.register(receive_delay, Form.report_delay, F.text & ~F.text.startswith("/"))
+    router.message.register(receive_accounts, Form.report_accounts, F.text & ~F.text.startswith("/"))
     router.message.register(receive_receipt, Form.receipt)
     router.message.register(cmd_stop, Command("stop"))
     router.message.register(cmd_grant, Command("grant"))
@@ -1106,9 +1292,12 @@ def build_app() -> tuple[Bot, Dispatcher]:
     # ── کالبک‌ها ──
     router.callback_query.register(process_callback, Form.main_menu)
     router.callback_query.register(process_callback, Form.report_types)
-    router.callback_query.register(back_to_menu, Form.report_guid, F.data == "back_menu")
+    router.callback_query.register(process_callback, Form.report_guid)
+    router.callback_query.register(back_to_menu, Form.report_resolve, F.data == "back_menu")
     router.callback_query.register(back_to_menu, Form.report_other_text, F.data == "back_menu")
     router.callback_query.register(back_to_menu, Form.report_count, F.data == "back_menu")
+    router.callback_query.register(back_to_menu, Form.report_delay, F.data == "back_menu")
+    router.callback_query.register(back_to_menu, Form.report_accounts, F.data == "back_menu")
     router.callback_query.register(back_to_menu, Form.receipt, F.data == "back_menu")
     router.callback_query.register(check_join_callback, F.data == "check_join")
     router.callback_query.register(admin_approve_sub, F.data.startswith("approve_sub_") | F.data.startswith("reject_sub_"))

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 coding by amirwebcode : telegram = @saeqehe
-pip install python-telegram-bot==22.7 rubpy pycryptodome
+pip install aiogram rubpy pycryptodome
 """
 
 import asyncio
@@ -20,23 +20,19 @@ from rubpy import Client as RubikaClient
 from rubpy.crypto import Crypto
 from rubpy.enums import ReportType
 
-from telegram import (
-    ChatMember,
+from aiogram import Bot, Dispatcher, F, Router
+from aiogram.enums import ButtonStyle, ChatMemberStatus
+from aiogram.filters import Command, CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import (
+    CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
+    Message,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
-    Update,
-)
-from telegram.ext import (
-    Application,
-    CallbackQueryHandler,
-    CommandHandler,
-    ContextTypes,
-    ConversationHandler,
-    MessageHandler,
-    filters,
 )
 
 logging.basicConfig(
@@ -48,6 +44,9 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = "8179859382:AAHnhHIa5-DXV923UfRdbEgOUnLO5P79qIs"
 ADMIN_IDS: set[int] = {8503523539}
 ADMIN_USERNAME = "@Saeqehe"
+
+ADMIN_CARD_NUMBER = "6219861453153586"  # ← شماره کارت خودت را اینجا بگذار
+PREMIUM_MONTHS   = 1
 
 REQUIRED_CHANNELS = ["mrvpn294", "amirwebcode1"]
 
@@ -61,18 +60,6 @@ DB_PATH      = os.path.join(BASE_DIR, "users.db")
 SESSIONS_DIR = os.path.join(BASE_DIR, "sessions")
 os.makedirs(SESSIONS_DIR, exist_ok=True)
 
-(
-    ST_PHONE,
-    ST_PASSWORD,
-    ST_CODE,
-    ST_MAIN_MENU,
-    ST_REPORT_GUID,
-    ST_REPORT_TYPES,
-    ST_REPORT_OTHER_TEXT,
-    ST_REPORT_COUNT,
-    ST_CARD_NUMBER,
-) = range(9)
-
 REPORT_TYPES_MAP: dict[str, tuple[str, ReportType]] = {
     "1": ("🔞 محتوای مستهجن", ReportType.PORNOGRAPHY),
     "2": ("⚔️ خشونت",         ReportType.VIOLENCE),
@@ -82,6 +69,24 @@ REPORT_TYPES_MAP: dict[str, tuple[str, ReportType]] = {
     "6": ("🎣 فیشینگ",        ReportType.FISHING),
     "7": ("📝 سایر",          ReportType.OTHER),
 }
+
+user_stop: dict[int, bool] = {}
+
+
+# ────────────────────────────────────────────────────────────────────────
+#  FSM
+# ────────────────────────────────────────────────────────────────────────
+class Form(StatesGroup):
+    phone            = State()
+    password         = State()
+    code             = State()
+    main_menu        = State()
+    report_guid      = State()
+    report_types     = State()
+    report_other_text = State()
+    report_count     = State()
+    receipt          = State()
+
 
 # ────────────────────────────────────────────────────────────────────────
 #  DB
@@ -158,6 +163,7 @@ def set_premium(telegram_id: int, months: int = 1) -> None:
     until = (datetime.now() + timedelta(days=30 * months)).isoformat()
     upsert_user(telegram_id, is_premium=1, premium_until=until)
 
+
 # ────────────────────────────────────────────────────────────────────────
 #  Helpers
 # ────────────────────────────────────────────────────────────────────────
@@ -194,14 +200,15 @@ def cleanup_session_files(session_path: str | None) -> None:
             except Exception:
                 pass
 
+
 # ────────────────────────────────────────────────────────────────────────
 #  Force Join
 # ────────────────────────────────────────────────────────────────────────
-async def check_user_membership(bot, user_id: int) -> bool:
+async def check_user_membership(bot: Bot, user_id: int) -> bool:
     for channel in REQUIRED_CHANNELS:
         try:
             member = await bot.get_chat_member(chat_id=f"@{channel}", user_id=user_id)
-            if member.status in (ChatMember.LEFT, ChatMember.BANNED):
+            if member.status in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED, ChatMemberStatus.KICKED):
                 return False
         except Exception as exc:
             logger.warning("check_member @%s user=%d: %s (بات ادمین کانال نیست؟)", channel, user_id, exc)
@@ -211,9 +218,10 @@ async def check_user_membership(bot, user_id: int) -> bool:
 def kb_force_join() -> InlineKeyboardMarkup:
     buttons = []
     for ch in REQUIRED_CHANNELS:
-        buttons.append([InlineKeyboardButton(f"📢 @{ch}", url=f"https://t.me/{ch}")])
-    buttons.append([InlineKeyboardButton("✅ بررسی عضویت", callback_data="check_join")])
-    return InlineKeyboardMarkup(buttons)
+        buttons.append([InlineKeyboardButton(text=f"📢 @{ch}", url=f"https://t.me/{ch}", style=ButtonStyle.PRIMARY)])
+    buttons.append([InlineKeyboardButton(text="✅ بررسی عضویت", callback_data="check_join", style=ButtonStyle.SUCCESS)])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
 
 # ────────────────────────────────────────────────────────────────────────
 #  Rubika auth
@@ -273,7 +281,6 @@ async def rubika_sign_in(phone: str, code: str, phone_code_hash: str) -> dict:
         )
 
         await client.register_device(device_model=session_name)
-
         await client.disconnect()
 
         return {
@@ -286,178 +293,179 @@ async def rubika_sign_in(phone: str, code: str, phone_code_hash: str) -> dict:
         cleanup_session_files(session_path)
         raise RuntimeError(f"خطا در sign_in: {e}")
 
+
 # ────────────────────────────────────────────────────────────────────────
 #  Keyboards with colors
 # ────────────────────────────────────────────────────────────────────────
+def colored_button(text: str, callback_data: str = None, url: str = None, style: ButtonStyle = ButtonStyle.PRIMARY) -> InlineKeyboardButton:
+    """ساخت دکمه شیشه‌ای رنگی"""
+    if url:
+        return InlineKeyboardButton(text=text, url=url, style=style)
+    return InlineKeyboardButton(text=text, callback_data=callback_data, style=style)
+
 def kb_phone() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        [[KeyboardButton("📱 ارسال شماره تماس", request_contact=True)]],
+        keyboard=[[KeyboardButton(text="📱 ارسال شماره تماس", request_contact=True)]],
         resize_keyboard=True,
     )
 
 def kb_main(premium: bool) -> InlineKeyboardMarkup:
     plan_label = "⭐ ویژه" if premium else "🔹 رایگان"
-    return InlineKeyboardMarkup([
+    return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton("🚨 گزارش تخلف", callback_data="start_report"),
-            InlineKeyboardButton("📊 وضعیت حساب", callback_data="account_status"),
+            InlineKeyboardButton(text="🚨 گزارش تخلف", callback_data="start_report", style=ButtonStyle.DANGER),
+            InlineKeyboardButton(text="📊 وضعیت حساب", callback_data="account_status", style=ButtonStyle.PRIMARY),
         ],
         [
-            InlineKeyboardButton(f"💎 {plan_label}", callback_data="subscription"),
-            InlineKeyboardButton("🎁 جایزه روزانه", callback_data="daily_reward"),
+            InlineKeyboardButton(text=f"💎 {plan_label}", callback_data="subscription", style=ButtonStyle.SUCCESS),
+            InlineKeyboardButton(text="🎁 جایزه روزانه", callback_data="daily_reward", style=ButtonStyle.SUCCESS),
         ],
         [
-            InlineKeyboardButton("🔗 لینک دعوت", callback_data="referral_link"),
-            InlineKeyboardButton("❓ راهنما", callback_data="help"),
+            InlineKeyboardButton(text="🔗 لینک دعوت", callback_data="referral_link", style=ButtonStyle.PRIMARY),
+            InlineKeyboardButton(text="❓ راهنما", callback_data="help", style=ButtonStyle.SECONDARY),
         ],
     ])
 
 def kb_menu_return() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔙 بازگشت", callback_data="back_menu")],
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 بازگشت", callback_data="back_menu", style=ButtonStyle.SECONDARY)],
     ])
 
-def kb_report_types(selected: set[str]) -> InlineKeyboardMarkup:
+def kb_report_types(selected: set) -> InlineKeyboardMarkup:
     buttons = []
     for k, (label, _) in REPORT_TYPES_MAP.items():
         mark = "✅" if k in selected else "⬜"
-        buttons.append([InlineKeyboardButton(f"{mark} {label}", callback_data=f"rt_{k}")])
-    buttons.append([InlineKeyboardButton("▶️ شروع گزارش", callback_data="rt_confirm")])
-    return InlineKeyboardMarkup(buttons)
+        style = ButtonStyle.SUCCESS if k in selected else ButtonStyle.PRIMARY
+        buttons.append([InlineKeyboardButton(text=f"{mark} {label}", callback_data=f"rt_{k}", style=style)])
+    buttons.append([InlineKeyboardButton(text="▶️ شروع گزارش", callback_data="rt_confirm", style=ButtonStyle.SUCCESS)])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-def colored_button(text: str, callback_data: str, color: str = "primary") -> InlineKeyboardButton:
-    """ساخت دکمه با رنگ‌های مختلف"""
-    styles = {
-        "primary": {"style": "primary"},
-        "success": {"style": "success"},
-        "danger": {"style": "danger"},
-        "secondary": {"style": "secondary"},
-    }
-    style = styles.get(color, {"style": "primary"})
-    return InlineKeyboardButton(text, callback_data=callback_data, **style)
 
 # ────────────────────────────────────────────────────────────────────────
-#  Conversation handlers
+#  Handlers
 # ────────────────────────────────────────────────────────────────────────
-async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    tg_id = update.effective_user.id
-    bot = ctx.bot
-    user  = get_user(tg_id)
-    ctx.user_data.clear()
+async def cmd_start(message: Message, command: CommandStart, state: FSMContext) -> None:
+    bot = message.bot
+    tg_id = message.from_user.id
+    await state.clear()
 
-    args = ctx.args or []
+    args = (command.args or "").split()
     if args and args[0].startswith("ref_"):
         try:
             referrer_id = int(args[0][4:])
             if referrer_id != tg_id:
-                ctx.user_data["referrer_id"] = referrer_id
+                await state.update_data(referrer_id=referrer_id)
         except (ValueError, IndexError):
             pass
 
     is_member = await check_user_membership(bot, tg_id)
     if not is_member:
-        await update.message.reply_text(
+        await message.answer(
             "⛔ برای استفاده از ربات ابتدا باید در کانال‌های زیر عضو شوید:\n\n"
             "بعد از عضویت، دکمه «بررسی عضویت» را بزنید:",
             reply_markup=kb_force_join(),
         )
-        return ConversationHandler.END
+        return
 
+    user = get_user(tg_id)
     if user and user.get("rubika_session") and session_exists(user["rubika_session"]):
         premium = is_premium_active(user)
-        await update.message.reply_text("👋 خوش برگشتی!", reply_markup=kb_main(premium))
-        return ST_MAIN_MENU
+        await message.answer("👋 خوش برگشتی!", reply_markup=kb_main(premium))
+        await state.set_state(Form.main_menu)
+        return
 
-    await update.message.reply_text(
+    await message.answer(
         "📱 شماره روبیکا (یا دکمه ارسال تماس) را بفرست:\nمثال: 09123456789",
         reply_markup=kb_phone(),
     )
-    return ST_PHONE
+    await state.set_state(Form.phone)
 
-async def receive_phone(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    if update.message.contact:
-        phone_raw = update.message.contact.phone_number
+
+async def receive_phone(message: Message, state: FSMContext) -> None:
+    if message.contact:
+        phone_raw = message.contact.phone_number
     else:
-        phone_raw = update.message.text.strip()
+        phone_raw = message.text.strip()
 
     normalized = _normalize_phone(phone_raw)
     if not normalized:
-        await update.message.reply_text(
+        await message.answer(
             "❌ شماره نامعتبر.\nیک شماره معتبر ایرانی وارد کنید.",
             reply_markup=kb_phone(),
         )
-        return ST_PHONE
+        return
 
-    ctx.user_data["phone"] = normalized
-    await update.message.reply_text("⏳ ارسال کد تایید...", reply_markup=ReplyKeyboardRemove())
+    await state.update_data(phone=normalized)
+    await message.answer("⏳ ارسال کد تایید...", reply_markup=ReplyKeyboardRemove())
 
     try:
         result = await rubika_send_code(normalized)
-        ctx.user_data["phone_code_hash"] = result["phone_code_hash"]
+        await state.update_data(phone_code_hash=result["phone_code_hash"])
 
         if result.get("status") == "SendPassKey":
             hint = result.get("hint_pass_key", "ندارد")
-            ctx.user_data["needs_password"] = True
-            await update.message.reply_text(
+            await state.update_data(needs_password=True)
+            await message.answer(
                 "🔑 این حساب رمز دو مرحله‌ای دارد.\n"
                 f"راهنمایی: {hint}\n\n"
                 "لطفاً رمز عبور را وارد کنید:"
             )
-            return ST_PASSWORD
+            await state.set_state(Form.password)
+            return
 
-        ctx.user_data["needs_password"] = False
-        await update.message.reply_text(
+        await state.update_data(needs_password=False)
+        await message.answer(
             "✅ کد تایید ارسال شد!\n"
             "کد ۶ رقمی را از پیامک روبیکا بخوانید و اینجا بفرستید:"
         )
-        return ST_CODE
+        await state.set_state(Form.code)
 
     except Exception as exc:
         logger.error("send_code: %s", exc)
-        await update.message.reply_text(f"❌ {exc}\nبا /start دوباره تلاش کن.")
-        return ConversationHandler.END
+        await message.answer(f"❌ {exc}\nبا /start دوباره تلاش کن.")
+        await state.clear()
 
-async def receive_password(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    password = update.message.text.strip()
-    phone    = ctx.user_data.get("phone", "")
+
+async def receive_password(message: Message, state: FSMContext) -> None:
+    password = message.text.strip() if message.text else ""
+    data = await state.get_data()
+    phone = data.get("phone", "")
 
     if not password:
-        await update.message.reply_text("❌ رمز نمی‌تواند خالی باشد. دوباره:")
-        return ST_PASSWORD
+        await message.answer("❌ رمز نمی‌تواند خالی باشد. دوباره:")
+        return
 
-    await update.message.reply_text("⏳ بررسی رمز عبور...")
+    await message.answer("⏳ بررسی رمز عبور...")
 
     try:
         result = await rubika_send_code(phone, pass_key=password)
-        ctx.user_data["phone_code_hash"] = result["phone_code_hash"]
+        await state.update_data(phone_code_hash=result["phone_code_hash"])
 
         if result.get("status") == "SendPassKey":
             hint = result.get("hint_pass_key", "ندارد")
-            await update.message.reply_text(
-                f"❌ رمز اشتباه است. راهنمایی: {hint}\nدوباره:"
-            )
-            return ST_PASSWORD
+            await message.answer(f"❌ رمز اشتباه است. راهنمایی: {hint}\nدوباره:")
+            return
 
-        await update.message.reply_text("✅ رمز تایید شد!\nکد ۶ رقمی را از پیامک بفرستید:")
-        return ST_CODE
+        await message.answer("✅ رمز تایید شد!\nکد ۶ رقمی را از پیامک بفرستید:")
+        await state.set_state(Form.code)
 
     except Exception as exc:
         logger.error("send_code passkey: %s", exc)
-        await update.message.reply_text(f"❌ {exc}")
-        return ST_PASSWORD
+        await message.answer(f"❌ {exc}")
 
-async def receive_code(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    code  = update.message.text.strip()
-    phone = ctx.user_data.get("phone", "")
-    phone_code_hash = ctx.user_data.get("phone_code_hash", "")
-    tg_id = update.effective_user.id
 
-    code_digits = re.sub(r"\D", "", code)
+async def receive_code(message: Message, state: FSMContext) -> None:
+    code_digits = re.sub(r"\D", "", message.text or "")
+    data = await state.get_data()
+    phone = data.get("phone", "")
+    phone_code_hash = data.get("phone_code_hash", "")
+    tg_id = message.from_user.id
+
     if len(code_digits) < 4 or len(code_digits) > 8:
-        await update.message.reply_text("❌ کد ۴ تا ۸ رقم باید باشد. دوباره:")
-        return ST_CODE
+        await message.answer("❌ کد ۴ تا ۸ رقم باید باشد. دوباره:")
+        return
 
-    await update.message.reply_text("⏳ در حال ورود...")
+    await message.answer("⏳ در حال ورود...")
 
     try:
         login_data = await rubika_sign_in(phone, code_digits, phone_code_hash)
@@ -470,7 +478,7 @@ async def receive_code(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
             rubika_private_key=login_data["private_key"],
         )
 
-        referrer_id = ctx.user_data.get("referrer_id")
+        referrer_id = data.get("referrer_id")
         if referrer_id:
             referrer = get_user(referrer_id)
             if referrer:
@@ -483,7 +491,7 @@ async def receive_code(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
                     new_until = now + timedelta(hours=1)
                 upsert_user(referrer_id, is_premium=1, premium_until=new_until.isoformat())
                 try:
-                    await ctx.bot.send_message(
+                    await message.bot.send_message(
                         chat_id=referrer_id,
                         text=(
                             f"🎁 یک نفر با لینک دعوت شما عضو شد!\n"
@@ -493,97 +501,96 @@ async def receive_code(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
                     )
                 except Exception:
                     pass
-            ctx.user_data.pop("referrer_id", None)
+            await state.update_data(referrer_id=None)
 
         await asyncio.sleep(0.5)
-
-        await update.message.reply_text("✅ ورود موفق!", reply_markup=kb_main(False))
-        return ST_MAIN_MENU
+        await message.answer("✅ ورود موفق!", reply_markup=kb_main(False))
+        await state.set_state(Form.main_menu)
 
     except Exception as exc:
         logger.error("sign_in: %s", exc)
-        await update.message.reply_text(f"❌ {exc}")
-        return ST_CODE
+        await message.answer(f"❌ {exc}")
+
 
 # ────────────────────────────────────────────────────────────────────────
-#  Main menu / Callback handler
+#  Callbacks
 # ────────────────────────────────────────────────────────────────────────
-async def check_join_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-    tg_id = update.effective_user.id
-    bot = ctx.bot
+async def check_join_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    bot = callback.bot
+    tg_id = callback.from_user.id
 
     is_member = await check_user_membership(bot, tg_id)
     if not is_member:
-        await query.message.reply_text(
+        await callback.message.answer(
             "❌ هنوز در کانال‌ها عضو نشدید!\n\n"
             "لطفاً ابتدا در هر دو کانال عضو شوید و سپس «بررسی عضویت» را بزنید:",
             reply_markup=kb_force_join(),
         )
-        return ConversationHandler.END
+        return
 
     user = get_user(tg_id)
     if user and user.get("rubika_session") and session_exists(user["rubika_session"]):
         premium = is_premium_active(user)
-        await query.message.reply_text("✅ عضویت تایید شد! 👋", reply_markup=kb_main(premium))
-        return ST_MAIN_MENU
+        await callback.message.answer("✅ عضویت تایید شد! 👋", reply_markup=kb_main(premium))
+        await state.set_state(Form.main_menu)
+        return
 
-    await query.message.reply_text(
+    await callback.message.answer(
         "✅ عضویت تایید شد!\n\n📱 شماره روبیکا را بفرست:",
         reply_markup=kb_phone(),
     )
-    return ST_PHONE
+    await state.set_state(Form.phone)
 
-async def back_to_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    if query:
-        await query.answer()
-        tg_id = update.effective_user.id
-        user  = get_user(tg_id)
-        premium = is_premium_active(user) if user else False
-        await query.message.reply_text("🏠 منو:", reply_markup=kb_main(premium))
-    return ST_MAIN_MENU
 
-async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-    data  = query.data
-    tg_id = update.effective_user.id
+async def back_to_menu(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    tg_id = callback.from_user.id
     user  = get_user(tg_id)
+    premium = is_premium_active(user) if user else False
+    await callback.message.answer("🏠 منو:", reply_markup=kb_main(premium))
+    await state.set_state(Form.main_menu)
+
+
+async def process_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    data  = callback.data
+    tg_id = callback.from_user.id
+    bot  = callback.bot
+    user = get_user(tg_id)
 
     if data == "back_menu":
         premium = is_premium_active(user) if user else False
-        await query.message.reply_text("🏠 منو:", reply_markup=kb_main(premium))
-        return ST_MAIN_MENU
+        await callback.message.answer("🏠 منو:", reply_markup=kb_main(premium))
+        await state.set_state(Form.main_menu)
+        return
 
     if data == "start_report":
         if not user or not user.get("rubika_session"):
-            await query.message.reply_text("❌ ابتدا /start بزن و وارد حساب روبیکا شو.")
-            return ST_MAIN_MENU
-
+            await callback.message.answer("❌ ابتدا /start بزن و وارد حساب روبیکا شو.")
+            await state.set_state(Form.main_menu)
+            return
         if not session_exists(user["rubika_session"]):
-            await query.message.reply_text(
-                "❌ سشن منقضی شده. لطفاً /start بزن و دوباره لاگین کن."
-            )
+            await callback.message.answer("❌ سشن منقضی شده. لطفاً /start بزن و دوباره لاگین کن.")
             upsert_user(tg_id, rubika_session=None, rubika_auth=None, rubika_private_key=None)
-            return ST_MAIN_MENU
-
-        await query.message.reply_text(
+            await state.set_state(Form.main_menu)
+            return
+        await callback.message.answer(
             "🎯 شناسه (object_guid) کاربر روبیکا را بفرست:\n\n"
             "مثال: u0A1bC2dE3fG4hI5jK6lM7nO8pQ9rS0T",
             reply_markup=kb_menu_return(),
         )
-        return ST_REPORT_GUID
+        await state.set_state(Form.report_guid)
+        return
 
     if data == "account_status":
         if not user:
-            await query.message.reply_text("ابتدا /start بزن.")
-            return ST_MAIN_MENU
+            await callback.message.answer("ابتدا /start بزن.")
+            return
         premium = is_premium_active(user)
         limit   = PREMIUM_LIMIT if premium else FREE_LIMIT
         plan    = "👑 اشتراکی" if premium else "🆓 رایگان"
-        await query.message.reply_text(
+        await callback.message.answer(
             f"📊 وضعیت حساب\n\n"
             f"پلن: {plan}\n"
             f"محدودیت: {limit} از هر نوع\n"
@@ -591,28 +598,29 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> in
             f"📱 شماره: {user.get('phone', '-')}",
             reply_markup=kb_menu_return(),
         )
-        return ST_MAIN_MENU
+        return
 
     if data == "subscription":
         premium = is_premium_active(user) if user else False
         if premium:
-            await query.message.reply_text(
+            await callback.message.answer(
                 f"👑 اشتراک تا {user['premium_until'][:10]} فعال است.",
                 reply_markup=kb_menu_return(),
             )
         else:
-            await query.message.reply_text(
-                f"💎 پلن اشتراکی\n"
-                f"• {PREMIUM_LIMIT} گزارش در هر نوع\n"
-                f"• {PREMIUM_PRICE} در ماه\n\n"
-                f"💳 شماره کارت بانکی خود را ارسال کنید تا رسید پرداخت برای ادمین ارسال شود:",
+            await callback.message.answer(
+                f"💎 خرید اشتراک یک ماهه\n"
+                f"📊 {PREMIUM_LIMIT} گزارش در هر نوع\n"
+                f"💰 مبلغ: {PREMIUM_PRICE}\n\n"
+                f"💳 شماره کارت برای واریز:\n{ADMIN_CARD_NUMBER}\n\n"
+                f"📸 لطفاً بعد از پرداخت، عکس رسید (فیش واریز) را بفرستید تا برای ادمین ارسال شود.",
                 reply_markup=kb_menu_return(),
             )
-            return ST_CARD_NUMBER
-        return ST_MAIN_MENU
+            await state.set_state(Form.receipt)
+        return
 
     if data == "help":
-        await query.message.reply_text(
+        await callback.message.answer(
             "❓ راهنما\n\n"
             "1. شناسه کاربر روبیکا را بفرست\n"
             "2. نوع گزارش را انتخاب کن\n"
@@ -623,17 +631,17 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> in
             "برای توقف /stop",
             reply_markup=kb_menu_return(),
         )
-        return ST_MAIN_MENU
+        return
 
     if data == "referral_link":
         if not user:
-            await query.message.reply_text("ابتدا /start بزن.")
-            return ST_MAIN_MENU
-        bot_info = await ctx.bot.get_me()
+            await callback.message.answer("ابتدا /start بزن.")
+            return
+        bot_info = await bot.get_me()
         bot_username = bot_info.username
         ref_link = f"https://t.me/{bot_username}?start=ref_{tg_id}"
         invites = user.get("total_invites", 0)
-        await query.message.reply_text(
+        await callback.message.answer(
             f"🔗 لینک دعوت شما\n\n"
             f"📱 لینک:\n{ref_link}\n\n"
             f"👥 تعداد دعوت‌ها: {invites}\n\n"
@@ -641,12 +649,12 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> in
             f"   ۱ ساعت اشتراک رایگان دریافت می‌کنید!",
             reply_markup=kb_menu_return(),
         )
-        return ST_MAIN_MENU
+        return
 
     if data == "daily_reward":
         if not user:
-            await query.message.reply_text("ابتدا /start بزن.")
-            return ST_MAIN_MENU
+            await callback.message.answer("ابتدا /start بزن.")
+            return
 
         last_reward = user.get("last_daily_reward")
         now = datetime.now()
@@ -659,15 +667,15 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> in
                     remaining = timedelta(hours=24) - diff
                     hours = remaining.seconds // 3600
                     minutes = (remaining.seconds % 3600) // 60
-                    await query.message.reply_text(
+                    await callback.message.answer(
                         f"⏳ جایزه بعدی در {hours} ساعت و {minutes} دقیقه",
                         reply_markup=kb_menu_return(),
                     )
-                    return ST_MAIN_MENU
+                    return
             except (ValueError, TypeError):
                 pass
 
-        dice_msg = await query.message.reply_text("🎲")
+        dice_msg = await callback.message.answer("🎲")
         await asyncio.sleep(0.5)
         await dice_msg.edit_text("🎲 .")
         await asyncio.sleep(0.5)
@@ -721,94 +729,91 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> in
         else:
             result_text += "\n\n💡 فردا دوباره امتحان کنید!"
             await dice_msg.edit_text(result_text, reply_markup=kb_menu_return())
-        return ST_MAIN_MENU
+        return
 
     if data.startswith("rt_"):
         key = data[3:]
 
         if key == "confirm":
-            selected: set = ctx.user_data.get("selected_types", set())
+            state_data = await state.get_data()
+            selected: set = state_data.get("selected_types", set())
             if not selected:
-                await query.answer("حداقل یک نوع انتخاب کن.", show_alert=True)
-                return ST_REPORT_TYPES
+                await callback.answer("حداقل یک نوع انتخاب کن.", show_alert=True)
+                return
 
             if "7" in selected:
-                await query.message.reply_text(
-                    "متن گزارش «سایر» را بنویس:",
-                    reply_markup=kb_menu_return(),
-                )
-                return ST_REPORT_OTHER_TEXT
+                await callback.message.answer("متن گزارش «سایر» را بنویس:", reply_markup=kb_menu_return())
+                await state.set_state(Form.report_other_text)
+                return
 
-            user_l = get_user(tg_id)
-            premium = is_premium_active(user_l) if user_l else False
+            premium = is_premium_active(user) if user else False
             limit   = PREMIUM_LIMIT if premium else FREE_LIMIT
             labels  = [REPORT_TYPES_MAP[k][0] for k in selected]
-            await query.message.reply_text(
+            await callback.message.answer(
                 f"انتخاب: {', '.join(labels)}\n"
                 f"چند گزارش از هر نوع؟ (حداکثر {limit})",
                 reply_markup=kb_menu_return(),
             )
-            return ST_REPORT_COUNT
+            await state.set_state(Form.report_count)
+            return
 
-        selected: set = ctx.user_data.setdefault("selected_types", set())
+        state_data = await state.get_data()
+        selected: set = state_data.get("selected_types", set())
         if key in selected:
             selected.discard(key)
         else:
             selected.add(key)
+        await state.update_data(selected_types=selected)
+        await callback.message.edit_reply_markup(reply_markup=kb_report_types(selected))
+        return
 
-        await query.message.edit_reply_markup(reply_markup=kb_report_types(selected))
-        return ST_REPORT_TYPES
 
-    return ST_MAIN_MENU
-
-async def receive_guid(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    guid  = update.message.text.strip()
-    tg_id = update.effective_user.id
+async def receive_guid(message: Message, state: FSMContext) -> None:
+    guid = message.text.strip()
+    tg_id = message.from_user.id
 
     if not re.match(r"^[a-zA-Z0-9_\-]{10,64}$", guid):
-        await update.message.reply_text(
-            "❌ شناسه نامعتبر. یک object_guid معتبر بفرست.",
-            reply_markup=kb_menu_return(),
-        )
-        return ST_REPORT_GUID
+        await message.answer("❌ شناسه نامعتبر. یک object_guid معتبر بفرست.", reply_markup=kb_menu_return())
+        return
 
-    ctx.user_data["object_guid"]    = guid
-    ctx.user_data["selected_types"] = set()
+    await state.update_data(object_guid=guid, selected_types=set())
+    await message.answer("نوع گزارش را انتخاب کن:", reply_markup=kb_report_types(set()))
+    await state.set_state(Form.report_types)
 
-    await update.message.reply_text("نوع گزارش را انتخاب کن:", reply_markup=kb_report_types(set()))
-    return ST_REPORT_TYPES
 
-async def receive_other_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    text  = update.message.text.strip()
-    tg_id = update.effective_user.id
-    user  = get_user(tg_id)
+async def receive_other_text(message: Message, state: FSMContext) -> None:
+    text = message.text.strip()
+    tg_id = message.from_user.id
+    user = get_user(tg_id)
 
     if not text or len(text) < 3:
-        await update.message.reply_text("❌ حداقل ۳ کاراکتر بنویس.", reply_markup=kb_menu_return())
-        return ST_REPORT_OTHER_TEXT
+        await message.answer("❌ حداقل ۳ کاراکتر بنویس.", reply_markup=kb_menu_return())
+        return
 
-    ctx.user_data["other_report_text"] = text
+    await state.update_data(other_report_text=text)
+    state_data = await state.get_data()
     premium = is_premium_active(user) if user else False
     limit   = PREMIUM_LIMIT if premium else FREE_LIMIT
-    selected: set = ctx.user_data.get("selected_types", set())
+    selected: set = state_data.get("selected_types", set())
     labels = [REPORT_TYPES_MAP[k][0] for k in selected]
 
-    await update.message.reply_text(
+    await message.answer(
         f"انتخاب: {', '.join(labels)}\nچند گزارش از هر نوع؟ (حداکثر {limit})",
         reply_markup=kb_menu_return(),
     )
-    return ST_REPORT_COUNT
+    await state.set_state(Form.report_count)
 
-async def receive_count(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    text  = update.message.text.strip()
-    tg_id = update.effective_user.id
-    user  = get_user(tg_id)
+
+async def receive_count(message: Message, state: FSMContext) -> None:
+    text = message.text.strip()
+    tg_id = message.from_user.id
+    user = get_user(tg_id)
 
     if not text.isdigit() or int(text) < 1:
-        await update.message.reply_text("❌ عدد مثبت وارد کن.", reply_markup=kb_menu_return())
-        return ST_REPORT_COUNT
+        await message.answer("❌ عدد مثبت وارد کن.", reply_markup=kb_menu_return())
+        return
 
-    count   = int(text)
+    count = int(text)
     premium = is_premium_active(user) if user else False
     limit   = PREMIUM_LIMIT if premium else FREE_LIMIT
 
@@ -816,43 +821,44 @@ async def receive_count(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         msg = f"❌ محدودیت پلن: {limit} گزارش."
         if not premium:
             msg += f"\n💎 اشتراک: {ADMIN_USERNAME}"
-        await update.message.reply_text(msg + "\nعدد کمتر:", reply_markup=kb_menu_return())
-        return ST_REPORT_COUNT
+        await message.answer(msg + "\nعدد کمتر:", reply_markup=kb_menu_return())
+        return
 
-    object_guid = ctx.user_data.get("object_guid", "")
-    selected    = ctx.user_data.get("selected_types", set())
-    other_text  = ctx.user_data.get("other_report_text", "")
+    state_data = await state.get_data()
+    object_guid = state_data.get("object_guid", "")
+    selected    = state_data.get("selected_types", set())
+    other_text  = state_data.get("other_report_text", "")
 
     if not selected:
-        await update.message.reply_text("❌ حداقل یک نوع گزارش انتخاب کن.", reply_markup=kb_menu_return())
-        return ST_MAIN_MENU
+        await message.answer("❌ حداقل یک نوع گزارش انتخاب کن.", reply_markup=kb_menu_return())
+        await state.set_state(Form.main_menu)
+        return
 
     if not object_guid:
-        await update.message.reply_text("❌ شناسه کاربر یافت نشد. /start بزن.", reply_markup=kb_menu_return())
-        return ST_MAIN_MENU
+        await message.answer("❌ شناسه کاربر یافت نشد. /start بزن.", reply_markup=kb_menu_return())
+        await state.set_state(Form.main_menu)
+        return
 
     if not user or not user.get("rubika_session"):
-        await update.message.reply_text("❌ سشن معتبر نیست. /start بزن.", reply_markup=kb_menu_return())
-        return ST_MAIN_MENU
+        await message.answer("❌ سشن معتبر نیست. /start بزن.", reply_markup=kb_menu_return())
+        await state.set_state(Form.main_menu)
+        return
 
     session_path = user["rubika_session"]
-
     if not session_exists(session_path):
-        await update.message.reply_text("❌ سشن منقضی شده. /start بزن.", reply_markup=kb_menu_return())
+        await message.answer("❌ سشن منقضی شده. /start بزن.", reply_markup=kb_menu_return())
         upsert_user(tg_id, rubika_session=None, rubika_auth=None, rubika_private_key=None)
-        return ST_MAIN_MENU
+        await state.set_state(Form.main_menu)
+        return
 
     selected_types = [
         (REPORT_TYPES_MAP[k][0], REPORT_TYPES_MAP[k][1], other_text if k == "7" else "")
         for k in selected
     ]
 
-    ctx.user_data.pop("object_guid", None)
-    ctx.user_data.pop("selected_types", None)
-    ctx.user_data.pop("other_report_text", None)
-    ctx.user_data["stop_flag"] = False
+    await state.update_data(object_guid=None, selected_types=None, other_report_text=None)
 
-    await update.message.reply_text(
+    await message.answer(
         f"🚀 ارسال {count} گزارش برای {len(selected_types)} نوع...\n⛔ /stop برای توقف"
     )
 
@@ -863,91 +869,82 @@ async def receive_count(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
             object_guid=object_guid,
             selected_types=selected_types,
             count=count,
-            status_message=update.message,
-            ctx=ctx,
+            status_message=message,
         )
     )
-    return ST_MAIN_MENU
+    await state.set_state(Form.main_menu)
 
-async def cmd_stop(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    ctx.user_data["stop_flag"] = True
-    await update.message.reply_text("⛔ توقف")
+
+async def cmd_stop(message: Message) -> None:
+    user_stop[message.from_user.id] = True
+    await message.answer("⛔ توقف")
+
 
 # ────────────────────────────────────────────────────────────────────────
 #  Subscription / Card Number
 # ────────────────────────────────────────────────────────────────────────
-async def receive_card_number(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    text  = update.message.text.strip()
-    tg_id = update.effective_user.id
-    user  = get_user(tg_id)
+async def receive_receipt(message: Message, state: FSMContext) -> None:
+    tg_id = message.from_user.id
+    user = get_user(tg_id)
 
-    card_clean = re.sub(r"[^\d]", "", text)
-    if len(card_clean) != 16 or not card_clean.isdigit():
-        await update.message.reply_text(
-            "❌ شماره کارت نامعتبر است.\nیک شماره کارت ۱۶ رقمی وارد کنید:",
+    if not message.photo:
+        await message.answer(
+            "❌ لطفاً عکس رسید پرداخت (فیش واریز) را بفرستید.",
             reply_markup=kb_menu_return(),
         )
-        return ST_CARD_NUMBER
+        return
 
-    ctx.user_data["card_number"] = card_clean
+    photo = message.photo[-1]
 
-    card_display = f"{card_clean[:4]}-{card_clean[4:8]}-{card_clean[8:12]}-{card_clean[12:]}"
-
-    approve_keyboard = InlineKeyboardMarkup([
+    approve_keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton("✅ تایید", callback_data=f"approve_sub_{tg_id}"),
-            InlineKeyboardButton("❌ رد", callback_data=f"reject_sub_{tg_id}"),
+            InlineKeyboardButton(text="✅ تایید", callback_data=f"approve_sub_{tg_id}", style=ButtonStyle.SUCCESS),
+            InlineKeyboardButton(text="❌ رد", callback_data=f"reject_sub_{tg_id}", style=ButtonStyle.DANGER),
         ]
     ])
 
     for admin_id in ADMIN_IDS:
         try:
-            await ctx.bot.send_message(
+            await message.bot.send_photo(
                 chat_id=admin_id,
-                text=(
-                    f"💎 درخواست اشتراک جدید\n\n"
+                photo=photo.file_id,
+                caption=(
+                    f"💎 رسید پرداخت اشتراک\n\n"
                     f"👤 کاربر: {user.get('phone', '-')}\n"
                     f"🆔 تلگرام: {tg_id}\n"
-                    f"💳 کارت: {card_display}\n"
                     f"💰 مبلغ: {PREMIUM_PRICE}\n"
                     f"⏰ تاریخ: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
                 ),
                 reply_markup=approve_keyboard,
             )
         except Exception as exc:
-            logger.error("Failed to send to admin %d: %s", admin_id, exc)
+            logger.error("Failed to send receipt to admin %d: %s", admin_id, exc)
 
-    await update.message.reply_text(
-        f"✅ درخواست شما ثبت شد!\n\n"
-        f"💳 کارت: {card_display}\n"
+    await message.answer(
+        "✅ رسید شما برای ادمین ارسال شد!\n\n"
         f"💰 مبلغ: {PREMIUM_PRICE}\n\n"
-        f"⏳ منتظر تایید ادمین باشید...\n"
-        f"بعد از تایید، اشتراک شما فعال می‌شود.",
+        "⏳ منتظر تایید ادمین بمانید؛ پس از تایید اشتراک یک ماهه فعال می‌شود.",
         reply_markup=kb_menu_return(),
     )
-    return ST_MAIN_MENU
+    await state.set_state(Form.main_menu)
 
-async def admin_approve_sub(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
 
-    if update.effective_user.id not in ADMIN_IDS:
-        await query.answer("⛔ فقط ادمین", show_alert=True)
+async def admin_approve_sub(callback: CallbackQuery) -> None:
+    await callback.answer()
+
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("⛔ فقط ادمین", show_alert=True)
         return
 
-    data = query.data
+    data = callback.data
     if data.startswith("approve_sub_"):
         target_id = int(data.split("_")[-1])
-        set_premium(target_id, 1)
-
-        await query.message.edit_text(
-            f"✅ اشتراک فعال شد!\n👤 کاربر: {target_id}"
-        )
-
+        set_premium(target_id, PREMIUM_MONTHS)
+        await callback.message.edit_text(f"✅ اشتراک فعال شد!\n👤 کاربر: {target_id}")
         try:
             user = get_user(target_id)
             premium_until = user.get("premium_until", "")[:10] if user else ""
-            await ctx.bot.send_message(
+            await callback.bot.send_message(
                 chat_id=target_id,
                 text=(
                     f"🎉 اشتراک شما فعال شد!\n\n"
@@ -960,17 +957,15 @@ async def admin_approve_sub(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
 
     elif data.startswith("reject_sub_"):
         target_id = int(data.split("_")[-1])
-        await query.message.edit_text(
-            f"❌ درخواست رد شد.\n👤 کاربر: {target_id}"
-        )
-
+        await callback.message.edit_text(f"❌ درخواست رد شد.\n👤 کاربر: {target_id}")
         try:
-            await ctx.bot.send_message(
+            await callback.bot.send_message(
                 chat_id=target_id,
                 text="❌ درخواست اشتراک شما توسط ادمین رد شد.\nبرای اطلاعات بیشتر با ادمین تماس بگیرید.",
             )
         except Exception as exc:
             logger.error("Failed to notify user %d: %s", target_id, exc)
+
 
 # ────────────────────────────────────────────────────────────────────────
 #  Pipeline
@@ -981,12 +976,13 @@ async def _pipeline(
     object_guid: str,
     selected_types: list[tuple[str, ReportType, str]],
     count: int,
-    status_message,
-    ctx: ContextTypes.DEFAULT_TYPE,
+    status_message: Message,
 ) -> None:
+    user_stop[tg_id] = False
+
     async def reply(msg: str) -> None:
         try:
-            await status_message.reply_text(msg)
+            await status_message.answer(msg)
         except Exception:
             pass
 
@@ -995,7 +991,7 @@ async def _pipeline(
         async with client:
             tasks = [
                 asyncio.create_task(
-                    _single_loop(client, object_guid, rt_enum, other_text, count, label, ctx)
+                    _single_loop(client, object_guid, rt_enum, other_text, count, label, tg_id)
                 )
                 for label, rt_enum, other_text in selected_types
             ]
@@ -1016,17 +1012,16 @@ async def _pipeline(
             lines.append(f"✅ {label}: {sent} ارسال | {failed} ناموفق")
 
     add_stats(tg_id, total_sent)
-
     user    = get_user(tg_id)
     premium = is_premium_active(user) if user else False
 
     await reply("📊 گزارش:\n" + "\n".join(lines))
-    await reply(f"🪙 +{total_sent * 10} سکه")
 
     try:
-        await status_message.reply_text("🔵 منو:", reply_markup=kb_main(premium))
+        await status_message.answer("🔵 منو:", reply_markup=kb_main(premium))
     except Exception:
         pass
+
 
 async def _single_loop(
     client: RubikaClient,
@@ -1035,12 +1030,12 @@ async def _single_loop(
     other_text: str,
     count: int,
     label: str,
-    ctx: ContextTypes.DEFAULT_TYPE,
+    tg_id: int,
 ) -> tuple[str, int, int]:
     sent   = 0
     failed = 0
     for i in range(1, count + 1):
-        if ctx.user_data.get("stop_flag"):
+        if user_stop.get(tg_id):
             break
         try:
             if report_type_enum == ReportType.OTHER:
@@ -1055,88 +1050,77 @@ async def _single_loop(
             await asyncio.sleep(REPORT_DELAY)
     return label, sent, failed
 
+
 # ────────────────────────────────────────────────────────────────────────
 #  Admin
 # ────────────────────────────────────────────────────────────────────────
-async def cmd_grant(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_user.id not in ADMIN_IDS:
+async def cmd_grant(message: Message) -> None:
+    if message.from_user.id not in ADMIN_IDS:
         return
-    args = ctx.args or []
+    args = (message.text or "").split()[1:]
     if not args:
-        await update.message.reply_text("/grant <telegram_id> [months]")
+        await message.answer("/grant <telegram_id> [months]")
         return
     try:
         target_id = int(args[0])
         months    = int(args[1]) if len(args) > 1 else 1
         set_premium(target_id, months)
-        await update.message.reply_text(f"✅ اشتراک {months} ماهه برای {target_id}")
+        await message.answer(f"✅ اشتراک {months} ماهه برای {target_id}")
     except (ValueError, IndexError):
-        await update.message.reply_text("خطا در آرگومان‌ها.")
+        await message.answer("خطا در آرگومان‌ها.")
 
-async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_user.id not in ADMIN_IDS:
+
+async def cmd_stats(message: Message) -> None:
+    if message.from_user.id not in ADMIN_IDS:
         return
     with sqlite3.connect(DB_PATH) as conn:
         total = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         prem  = conn.execute("SELECT COUNT(*) FROM users WHERE is_premium=1").fetchone()[0]
         reps  = conn.execute("SELECT SUM(total_reports) FROM users").fetchone()[0] or 0
-    await update.message.reply_text(f"📊 آمار\n👥 {total}\n👑 {prem}\n📢 {reps}")
+    await message.answer(f"📊 آمار\n👥 {total}\n👑 {prem}\n📢 {reps}")
+
 
 # ────────────────────────────────────────────────────────────────────────
 #  Main
 # ────────────────────────────────────────────────────────────────────────
-def build_app() -> Application:
+def build_app() -> tuple[Bot, Dispatcher]:
     init_db()
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    bot = Bot(token=TELEGRAM_TOKEN)
+    dp = Dispatcher()
+    router = Router()
 
-    conv = ConversationHandler(
-        entry_points=[CommandHandler("start", cmd_start)],
-        states={
-            ST_PHONE: [
-                MessageHandler(filters.CONTACT, receive_phone),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_phone),
-            ],
-            ST_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_password)],
-            ST_CODE:     [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_code)],
-            ST_MAIN_MENU: [
-                CallbackQueryHandler(callback_handler),
-                CommandHandler("stop", cmd_stop),
-            ],
-            ST_REPORT_GUID: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_guid),
-                CallbackQueryHandler(back_to_menu, pattern="^back_menu$"),
-            ],
-            ST_REPORT_TYPES: [CallbackQueryHandler(callback_handler)],
-            ST_REPORT_OTHER_TEXT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_other_text),
-                CallbackQueryHandler(back_to_menu, pattern="^back_menu$"),
-            ],
-            ST_REPORT_COUNT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_count),
-                CallbackQueryHandler(back_to_menu, pattern="^back_menu$"),
-            ],
-        },
-        fallbacks=[
-            CommandHandler("start", cmd_start),
-            CommandHandler("stop", cmd_stop),
-            CallbackQueryHandler(check_join_callback, pattern="^check_join$"),
-        ],
-        per_user=True,
-        per_chat=True,
-        name="rubika_reporter",
-    )
+    # ── پیام‌ها ──
+    router.message.register(cmd_start, CommandStart())
+    router.message.register(receive_phone, Form.phone, F.contact | (F.text & ~Command()))
+    router.message.register(receive_password, Form.password, F.text & ~Command())
+    router.message.register(receive_code, Form.code, F.text & ~Command())
+    router.message.register(receive_guid, Form.report_guid, F.text & ~Command())
+    router.message.register(receive_other_text, Form.report_other_text, F.text & ~Command())
+    router.message.register(receive_count, Form.report_count, F.text & ~Command())
+    router.message.register(receive_receipt, Form.receipt)
+    router.message.register(cmd_stop, Command("stop"))
+    router.message.register(cmd_grant, Command("grant"))
+    router.message.register(cmd_stats, Command("stats"))
 
-    app.add_handler(conv)
-    app.add_handler(CallbackQueryHandler(check_join_callback, pattern="^check_join$"))
-    app.add_handler(CommandHandler("stop",  cmd_stop))
-    app.add_handler(CommandHandler("grant", cmd_grant))
-    app.add_handler(CommandHandler("stats", cmd_stats))
-    return app
+    # ── کالبک‌ها ──
+    router.callback_query.register(process_callback, Form.main_menu)
+    router.callback_query.register(process_callback, Form.report_types)
+    router.callback_query.register(back_to_menu, Form.report_guid, F.data == "back_menu")
+    router.callback_query.register(back_to_menu, Form.report_other_text, F.data == "back_menu")
+    router.callback_query.register(back_to_menu, Form.report_count, F.data == "back_menu")
+    router.callback_query.register(back_to_menu, Form.receipt, F.data == "back_menu")
+    router.callback_query.register(check_join_callback, F.data == "check_join")
+    router.callback_query.register(admin_approve_sub, F.data.startswith("approve_sub_") | F.data.startswith("reject_sub_"))
 
-def main() -> None:
-    app = build_app()
+    dp.include_router(router)
+    return bot, dp
+
+
+async def main() -> None:
+    bot, dp = build_app()
     logger.warning("[POLLING] starting...")
-    app.run_polling(drop_pending_updates=True)
+    await dp.start_polling(bot, drop_pending_updates=True)
+
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

@@ -1,5 +1,4 @@
-aiogram==3.16.0
+aiogram
 rubpy
 pycryptodome
 aiohttp
-pydantic>=2.10

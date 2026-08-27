@@ -287,7 +287,7 @@ async def rubika_sign_in(phone: str, code: str, phone_code_hash: str) -> dict:
         raise RuntimeError(f"خطا در sign_in: {e}")
 
 # ────────────────────────────────────────────────────────────────────────
-#  Keyboards
+#  Keyboards with colors
 # ────────────────────────────────────────────────────────────────────────
 def kb_phone() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
@@ -299,16 +299,16 @@ def kb_main(premium: bool) -> InlineKeyboardMarkup:
     plan_label = "⭐ ویژه" if premium else "🔹 رایگان"
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🚨 گزارش تخلف",    callback_data="start_report"),
-            InlineKeyboardButton("📊 وضعیت حساب",     callback_data="account_status"),
+            InlineKeyboardButton("🚨 گزارش تخلف", callback_data="start_report"),
+            InlineKeyboardButton("📊 وضعیت حساب", callback_data="account_status"),
         ],
         [
-            InlineKeyboardButton(f"💎 {plan_label}",  callback_data="subscription"),
-            InlineKeyboardButton("🎁 جایزه روزانه",   callback_data="daily_reward"),
+            InlineKeyboardButton(f"💎 {plan_label}", callback_data="subscription"),
+            InlineKeyboardButton("🎁 جایزه روزانه", callback_data="daily_reward"),
         ],
         [
-            InlineKeyboardButton("🔗 لینک دعوت",     callback_data="referral_link"),
-            InlineKeyboardButton("❓ راهنما",          callback_data="help"),
+            InlineKeyboardButton("🔗 لینک دعوت", callback_data="referral_link"),
+            InlineKeyboardButton("❓ راهنما", callback_data="help"),
         ],
     ])
 
@@ -324,6 +324,17 @@ def kb_report_types(selected: set[str]) -> InlineKeyboardMarkup:
         buttons.append([InlineKeyboardButton(f"{mark} {label}", callback_data=f"rt_{k}")])
     buttons.append([InlineKeyboardButton("▶️ شروع گزارش", callback_data="rt_confirm")])
     return InlineKeyboardMarkup(buttons)
+
+def colored_button(text: str, callback_data: str, color: str = "primary") -> InlineKeyboardButton:
+    """ساخت دکمه با رنگ‌های مختلف"""
+    styles = {
+        "primary": {"style": "primary"},
+        "success": {"style": "success"},
+        "danger": {"style": "danger"},
+        "secondary": {"style": "secondary"},
+    }
+    style = styles.get(color, {"style": "primary"})
+    return InlineKeyboardButton(text, callback_data=callback_data, **style)
 
 # ────────────────────────────────────────────────────────────────────────
 #  Conversation handlers

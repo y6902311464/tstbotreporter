@@ -208,7 +208,7 @@ async def check_user_membership(bot: Bot, user_id: int) -> bool:
     for channel in REQUIRED_CHANNELS:
         try:
             member = await bot.get_chat_member(chat_id=f"@{channel}", user_id=user_id)
-            if member.status in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED, ChatMemberStatus.KICKED):
+            if member.status in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED, ChatMemberStatus.KICKED):
                 return False
         except Exception as exc:
             logger.warning("check_member @%s user=%d: %s (بات ادمین کانال نیست؟)", channel, user_id, exc)

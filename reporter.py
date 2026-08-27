@@ -1290,6 +1290,11 @@ def build_app() -> tuple[Bot, Dispatcher]:
     router.message.register(cmd_stats, Command("stats"))
 
     # ── کالبک‌ها ──
+    # هندلرهای خاص را اول ثبت کن (اولویت بالاتر) تا توسط process_callback سایه نشوند
+    router.callback_query.register(admin_approve_sub, F.data.startswith("approve_sub_") | F.data.startswith("reject_sub_"))
+    router.callback_query.register(check_join_callback, F.data == "check_join")
+
+    # منوی اصلی و بخش‌های گزارش (محدود به استیت)
     router.callback_query.register(process_callback, Form.main_menu)
     router.callback_query.register(process_callback, Form.report_types)
     router.callback_query.register(process_callback, Form.report_guid)
@@ -1299,8 +1304,11 @@ def build_app() -> tuple[Bot, Dispatcher]:
     router.callback_query.register(back_to_menu, Form.report_delay, F.data == "back_menu")
     router.callback_query.register(back_to_menu, Form.report_accounts, F.data == "back_menu")
     router.callback_query.register(back_to_menu, Form.receipt, F.data == "back_menu")
-    router.callback_query.register(check_join_callback, F.data == "check_join")
-    router.callback_query.register(admin_approve_sub, F.data.startswith("approve_sub_") | F.data.startswith("reject_sub_"))
+    router.callback_query.register(back_to_menu, Form.report_guid, F.data == "back_menu")
+
+    # fallback: اگر استیت از دست رفته باشد (مثلاً بعد از ری‌استارت بات)
+    # باز هم دکمه‌ها جواب بدهند
+    router.callback_query.register(process_callback)
 
     dp.include_router(router)
     return bot, dp

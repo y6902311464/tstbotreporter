@@ -1449,6 +1449,19 @@ async def admin_reply_to_user(callback: CallbackQuery, state: FSMContext) -> Non
     )
 
 
+async def admin_close_ticket(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("⛔ فقط ادمین", show_alert=True)
+        return
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+        closed_text = (callback.message.text or "") + "\n\n🚫 تیکت بسته شد."
+        await callback.message.edit_text(closed_text)
+    except Exception:
+        pass
+
+
 async def receive_admin_reply(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
 
@@ -1653,6 +1666,11 @@ def build_app() -> tuple[Bot, Dispatcher]:
     router.callback_query.register(admin_approve_sub, F.data.startswith("approve_sub_") | F.data.startswith("reject_sub_"))
     router.callback_query.register(check_join_callback, F.data == "check_join")
 
+    # ── ادمین (باید قبل از process_callback ثبت شوند تا توسط فیلتر استیت کور نشوند) ──
+    router.callback_query.register(admin_reply_to_user, F.data.startswith("admin_reply_"))
+    router.callback_query.register(admin_close_ticket, F.data == "admin_close_ticket")
+    router.callback_query.register(admin_panel_callback, F.data.startswith("admin_"))
+
     # منوی اصلی و بخش‌های گزارش (محدود به استیت)
     router.callback_query.register(process_callback, Form.main_menu)
     router.callback_query.register(process_callback, Form.report_types)
@@ -1668,10 +1686,6 @@ def build_app() -> tuple[Bot, Dispatcher]:
     router.callback_query.register(back_to_menu, Form.admin_panel, F.data == "back_menu")
     router.callback_query.register(back_to_menu, Form.broadcast, F.data == "back_menu")
     router.callback_query.register(back_to_menu, Form.admin_reply, F.data == "back_menu")
-
-    # ── ادمین ──
-    router.callback_query.register(admin_reply_to_user, F.data.startswith("admin_reply_"))
-    router.callback_query.register(admin_panel_callback, F.data.startswith("admin_"))
 
     # fallback: اگر استیت از دست رفته باشد (مثلاً بعد از ری‌استارت بات)
     # باز هم دکمه‌ها جواب بدهند

@@ -2,4 +2,3 @@ aiogram==3.7.0
 rubpy
 pycryptodome
 aiohttp
-python-3.12.8

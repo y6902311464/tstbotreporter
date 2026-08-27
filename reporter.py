@@ -203,6 +203,18 @@ def session_exists(session_path: str | None) -> bool:
         return False
     return any(os.path.isfile(session_path + ext) for ext in SESSION_EXTENSIONS) or os.path.isfile(session_path)
 
+
+# پیشوندهای واقعی شناسه‌های روبیکا (کاربر، کانال، گروه، ربات و ...)
+GUID_PREFIXES = ("u0", "c0", "g0", "b0", "m0", "s0", "o0", "p0", "ch0", "t0", "e0")
+
+
+def looks_like_guid(text: str) -> bool:
+    """فقط شناسه‌های واقعی روبیکا را تشخیص می‌دهد (نه یوزرنیم)."""
+    text = text.strip()
+    if any(text.startswith(p) for p in GUID_PREFIXES):
+        return bool(re.match(r"^(u0|c0|g0|b0|m0|s0|o0|p0|ch0|t0|e0)[A-Za-z0-9_\-]{6,}$", text))
+    return False
+
 def cleanup_session_files(session_path: str | None) -> None:
     if not session_path:
         return
@@ -379,19 +391,62 @@ def kb_report_guid_choice() -> InlineKeyboardMarkup:
 async def resolve_object_guid(session_path: str, text: str) -> Optional[str]:
     """متن را می‌گیرد: اگر خودش شناسه باشد برمی‌گرداند، وگرنه با یوزرنیم حل می‌کند."""
     text = text.strip().lstrip("@").strip()
-    if re.match(r"^[a-zA-Z0-9_\-]{10,64}$", text):
+    if looks_like_guid(text):
         return text
     try:
         client = RubikaClient(name=session_path)
         async with client:
             result = await client.get_object_by_username(text)
-            guid = result.user_guid
-            if not guid:
-                guid = result.object_guid
-            return guid if guid else None
+            # فقط مقداری که واقعاً شکل شناسه روبیکا دارد را برگردان
+            # اولویت با object_guid (یوزرنیم نیست)، بعد user_guid
+            for attr in ("object_guid", "user_guid", "guid", "group_guid", "channel_guid"):
+                val = getattr(result, attr, None)
+                if val and looks_like_guid(val):
+                    return val
+            # اگر result شیء تودرتو یا دیکشنری باشد، جستجوی عمقی انجام بده
+            found = _search_guid_in(result)
+            if found:
+                return found
+            logger.error("resolve_object_guid: هیچ شناسه معتبری در پاسخ پیدا نشد: %s", result)
+            return None
     except Exception as exc:
         logger.error("resolve_object_guid: %s", exc)
         return None
+
+
+def _search_guid_in(obj, _seen: set | None = None) -> Optional[str]:
+    """جستجوی بازگشتی برای اولین مقدار شبیه شناسه در پاسخ rubpy."""
+    if _seen is None:
+        _seen = set()
+    if obj is None or isinstance(obj, (int, float, bool)):
+        return None
+    if isinstance(obj, str):
+        return obj if looks_like_guid(obj) else None
+    try:
+        if id(obj) in _seen:
+            return None
+        _seen.add(id(obj))
+    except TypeError:
+        pass
+    if isinstance(obj, dict):
+        for v in obj.values():
+            r = _search_guid_in(v, _seen)
+            if r:
+                return r
+    else:
+        for attr in dir(obj):
+            if attr.startswith("_"):
+                continue
+            try:
+                v = getattr(obj, attr)
+            except Exception:
+                continue
+            if callable(v):
+                continue
+            r = _search_guid_in(v, _seen)
+            if r:
+                return r
+    return None
 # ────────────────────────────────────────────────────────────────────────
 async def cmd_start(message: Message, command: CommandStart, state: FSMContext) -> None:
     bot = message.bot
@@ -843,12 +898,35 @@ async def receive_guid(message: Message, state: FSMContext) -> None:
     guid = message.text.strip()
     tg_id = message.from_user.id
 
-    if not re.match(r"^[a-zA-Z0-9_\-]{10,64}$", guid):
-        await message.answer("❌ شناسه نامعتبر. یک object_guid معتبر بفرست.", reply_markup=kb_menu_return())
+    if looks_like_guid(guid):
+        await state.update_data(object_guid=guid, selected_types=set())
+        await message.answer("نوع گزارش را انتخاب کن:", reply_markup=kb_report_types(set()))
+        await state.set_state(Form.report_types)
         return
 
-    await state.update_data(object_guid=guid, selected_types=set())
-    await message.answer("نوع گزارش را انتخاب کن:", reply_markup=kb_report_types(set()))
+    # اگر کاربر یوزرنیم/آیدی داد، مثل مسیر «دریافت با یوزرنیم» حلش می‌کنیم
+    user = get_user(tg_id)
+    if not user or not user.get("rubika_session") or not session_exists(user["rubika_session"]):
+        await message.answer("❌ سشن معتبر نیست. /start بزن.", reply_markup=kb_menu_return())
+        await state.set_state(Form.main_menu)
+        return
+
+    await message.answer("⏳ در حال جستجوی شناسه...")
+    resolved = await resolve_object_guid(user["rubika_session"], guid)
+    if not resolved:
+        await message.answer(
+            "❌ شناسه‌ای برای این یوزرنیم/آیدی پیدا نشد.",
+            reply_markup=kb_menu_return(),
+        )
+        await state.set_state(Form.main_menu)
+        return
+
+    await state.update_data(object_guid=resolved, selected_types=set())
+    await message.answer(
+        f"✅ شناسه پیدا شد:\n<code>{resolved}</code>\n\nنوع گزارش را انتخاب کن:",
+        reply_markup=kb_report_types(set()),
+        parse_mode="HTML",
+    )
     await state.set_state(Form.report_types)
 
 
